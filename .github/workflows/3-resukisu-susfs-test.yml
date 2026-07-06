@@ -467,7 +467,7 @@ jobs:
           DEFCONFIG_PATH="arch/arm64/configs/${{ github.event.inputs.defconfig }}"
 
           if [ "${{ github.event.inputs.use_extracted_config }}" = "true" ]; then
-            EXTRACTED_CFG="$GITHUB_WORKSPACE/extracted-config/my_defconfig.txt"
+            EXTRACTED_CFG="$GITHUB_WORKSPACE/extracted-config/bos13_defconfig"
             [ -f "$EXTRACTED_CFG" ] && cp "$EXTRACTED_CFG" "$DEFCONFIG_PATH"
           fi
 
