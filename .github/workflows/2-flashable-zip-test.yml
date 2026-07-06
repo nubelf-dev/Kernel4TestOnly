@@ -284,11 +284,12 @@ jobs:
 
           cat CHANGELOG.md
 
-      - name: Upload Flashable ZIP
+      - name: Upload Flashable ZIP (auto-zip GitHub)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ZIP_FILENAME }}
-          path: ${{ env.ZIP_FILENAME }}
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ak3-build/**
+          retention-days: 30
           if-no-files-found: error
 
       - name: Upload Changelog
