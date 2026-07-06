@@ -37,7 +37,7 @@ jobs:
     name: ${{ github.event.inputs.zip_name }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo (untuk akses extracted-config/my_defconfig.txt)
+      - name: Checkout repo (untuk akses extracted-config/bos13_defconfig)
         uses: actions/checkout@v4
 
       - name: Show Input
@@ -112,13 +112,13 @@ jobs:
           # tidak otomatis terisi sama oleh proses 'make defconfig && make olddefconfig'
           # dari defconfig mentah di source.
           if [ "${{ github.event.inputs.use_extracted_config }}" = "true" ]; then
-            EXTRACTED_CFG="$GITHUB_WORKSPACE/extracted-config/my_defconfig.txt"
+            EXTRACTED_CFG="$GITHUB_WORKSPACE/extracted-config/bos13_defconfig"
             if [ -f "$EXTRACTED_CFG" ]; then
               echo "[INFO] Memakai config hasil extract boot.img asli sebagai basis (menimpa $DEFCONFIG_PATH)."
               cp "$EXTRACTED_CFG" "$DEFCONFIG_PATH"
             else
               echo "[PERINGATAN] use_extracted_config=true tapi file $EXTRACTED_CFG tidak ditemukan di repo."
-              echo "Pastikan kamu sudah commit file extracted config ke path 'extracted-config/my_defconfig.txt' di repo ini."
+              echo "Pastikan kamu sudah commit file extracted config ke path 'extracted-config/bos13_defconfig' di repo ini."
               echo "Lanjut pakai defconfig asli dari source kernel sebagai fallback."
             fi
           fi
