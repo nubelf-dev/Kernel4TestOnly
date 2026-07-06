@@ -1,0 +1,421 @@
+name: 4. Build Flashable ZIP - AnyKernel3 (BOS Beryllium + ReSukiSU + SUSFS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      compile_run_id:
+        description: 'Run ID workflow "3. Compile Kernel ReSukiSU" yang sukses (angka setelah /runs/ di URL)'
+        required: true
+      compile_artifact_prefix:
+        description: 'Nilai "zip_name" yang dipakai saat run workflow 3 (untuk cari artifact "<nilai>-gz-dtb")'
+        required: true
+        default: 'bos-beryllium-resukisu-susfs'
+      zip_name:
+        description: 'Nama Build untuk artifact output workflow ini'
+        required: true
+        default: 'bos-beryllium-resukisu-susfs'
+      kernel_string:
+        description: 'kernel.string yang ditampilkan di AnyKernel3'
+        required: false
+        default: 'BOS Beryllium ReSukiSU + SUSFS Kernel'
+      manager_choice:
+        description: 'Pilih manager APK yang akan direferensikan di changelog'
+        required: true
+        default: 'ReSukiSU'
+        type: choice
+        options:
+          - 'ReSukiSU'
+          - 'SukiSU-Ultra'
+          - 'MKSU'
+          - 'RKSU'
+          - 'KOWSU'
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  # Mapping manager → GitHub repo URL
+  MANAGER_REPOS: |
+    ReSukiSU=https://github.com/ReSukiSU/ReSukiSU
+    SukiSU-Ultra=https://github.com/SukiSU-Ultra/SukiSU-Ultra
+    MKSU=https://github.com/5ec1cff/KernelSU
+    RKSU=https://github.com/rsuntk/KernelSU
+    KOWSU=https://github.com/KOWX712/KernelSU
+
+jobs:
+  build-flashable-zip:
+    name: ${{ github.event.inputs.zip_name }}-flashable
+    runs-on: ubuntu-latest
+    steps:
+
+      # ============================================================
+      # STEP 1: Setup & download artifact dari workflow compile
+      # ============================================================
+      - name: 1. Checkout repo
+        uses: actions/checkout@v4
+
+      - name: 2. Download Image.gz-dtb artifact dari workflow 3
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.compile_artifact_prefix }}-gz-dtb
+          run-id: ${{ github.event.inputs.compile_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: downloaded-artifact
+
+      - name: 3. Download build-metadata (opsional, buat changelog)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: build-metadata
+          run-id: ${{ github.event.inputs.compile_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: downloaded-metadata
+
+      - name: 4. Susun Image.gz-dtb & metadata
+        run: |
+          find downloaded-artifact -iname "Image.gz-dtb" -exec cp {} Image.gz-dtb \;
+          if [ ! -f Image.gz-dtb ]; then
+            echo "[FATAL] Image.gz-dtb tidak ditemukan!"
+            echo "Isi folder downloaded-artifact:"
+            find downloaded-artifact -type f
+            exit 1
+          fi
+          echo "== Image.gz-dtb =="
+          file Image.gz-dtb
+          ls -la Image.gz-dtb
+
+          if [ -f downloaded-metadata/build-metadata.json ]; then
+            cp downloaded-metadata/build-metadata.json build-metadata.json
+            echo ""
+            echo "== build-metadata.json =="
+            cat build-metadata.json
+          else
+            echo "[INFO] build-metadata.json tidak ditemukan. Changelog akan minim."
+          fi
+
+      # ============================================================
+      # STEP 2: Resolve manager APK URL berdasarkan pilihan user
+      # ============================================================
+      - name: 5. Resolve Manager APK URL
+        run: |
+          MANAGER="${{ github.event.inputs.manager_choice }}"
+          echo "Manager pilihan: $MANAGER"
+
+          MANAGER_REPO=$(echo "$MANAGER_REPOS" | grep "^${MANAGER}=" | cut -d= -f2)
+
+          if [ -z "$MANAGER_REPO" ]; then
+            echo "[FATAL] Manager $MANAGER tidak ada di mapping!"
+            exit 1
+          fi
+
+          echo "Manager repo: $MANAGER_REPO"
+
+          HTTP_STATUS=$(curl -o /dev/null -s -w "%{http_code}" -L "$MANAGER_REPO")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            MANAGER_RELEASE_URL="${MANAGER_REPO}/releases/latest"
+            MANAGER_STATUS="[OK] Repo manager ${MANAGER} valid. Download versi terbaru di link berikut."
+          else
+            MANAGER_RELEASE_URL="${MANAGER_REPO}/releases"
+            MANAGER_STATUS="[WARNING] HTTP status ${HTTP_STATUS} untuk ${MANAGER_REPO}. Coba manual di halaman releases."
+          fi
+
+          echo "MANAGER_NAME=$MANAGER" >> "$GITHUB_ENV"
+          echo "MANAGER_REPO=$MANAGER_REPO" >> "$GITHUB_ENV"
+          echo "MANAGER_RELEASE_URL=$MANAGER_RELEASE_URL" >> "$GITHUB_ENV"
+          echo "MANAGER_STATUS=$MANAGER_STATUS" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "$MANAGER_STATUS"
+          echo "URL final: $MANAGER_RELEASE_URL"
+
+      # ============================================================
+      # STEP 3: Build AnyKernel3 template
+      # ============================================================
+      - name: 6. Clone AnyKernel3 & patch untuk beryllium
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3-build
+          cd ak3-build
+
+          # Bersihkan file demo maguro/tuna + git metadata
+          rm -rf ramdisk patch vendor_ramdisk vendor_patch README.md version .git .github 2>/dev/null || true
+
+          python3 << 'PYEOF'
+          import re
+          import os
+
+          with open("anykernel.sh", "r") as f:
+              content = f.read()
+
+          kernel_string = os.environ.get("KERNEL_STRING_ENV", "BOS Beryllium ReSukiSU + SUSFS Kernel")
+
+          # 1. Ganti properties() untuk beryllium
+          new_properties = f"""properties() {{ '
+          kernel.string={kernel_string}
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=beryllium
+          device.name2=PocophoneF1
+          device.name3=PocoF1
+          device.name4=
+          device.name5=
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }} # end properties"""
+
+          content, n1 = re.subn(
+              r"properties\(\)\s*\{.*?\}\s*#\s*end properties",
+              new_properties,
+              content,
+              count=1,
+              flags=re.DOTALL,
+          )
+          print(f"[INFO] Blok properties() diganti: {n1} kali")
+
+          # 2. Hapus blok contoh ramdisk Galaxy Nexus (tuna)
+          tuna_pattern = re.compile(
+              r"# init\.rc\n.*?append_file fstab\.tuna \"usbdisk\" fstab;\n\n",
+              re.DOTALL,
+          )
+          content, n2 = tuna_pattern.subn("", content)
+          print(f"[INFO] Blok ramdisk demo dihapus: {n2} kali")
+
+          # 3. Ganti BLOCK= dari path OMAP (Galaxy Nexus) ke bootdevice/by-name (SDM845)
+          content, n3 = re.subn(
+              r"BLOCK=/dev/block/platform/omap/omap_hsmmc\.0/by-name/boot;",
+              "BLOCK=/dev/block/bootdevice/by-name/boot;",
+              content,
+              count=1,
+          )
+          print(f"[INFO] BLOCK= diganti: {n3} kali")
+
+          if n1 == 0:
+              print("[WARN] properties() tidak match")
+          if n2 == 0:
+              print("[WARN] Ramdisk demo tidak match")
+          if n3 == 0:
+              print("[WARN] BLOCK= tidak match")
+
+          with open("anykernel.sh", "w") as f:
+              f.write(content)
+          PYEOF
+        env:
+          KERNEL_STRING_ENV: ${{ github.event.inputs.kernel_string }}
+
+      - name: 7. Tampilkan anykernel.sh setelah patch
+        run: |
+          cd ak3-build
+          echo "== anykernel.sh setelah patch =="
+          cat anykernel.sh
+
+      # ============================================================
+      # STEP 4: Copy Image ke folder AnyKernel3 (siap upload)
+      # ============================================================
+      - name: 8. Prepare folder AnyKernel3 (siap zip oleh GitHub)
+        run: |
+          cp Image.gz-dtb ak3-build/
+
+          # Set nama artifact (tanpa .zip di akhir, GitHub yang tambah otomatis)
+          ARTIFACT_NAME="${{ github.event.inputs.zip_name }}-$(date -u +%Y%m%d-%H%M)"
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> "$GITHUB_ENV"
+
+          echo "== Isi ak3-build (siap jadi flashable ZIP) =="
+          ls -la ak3-build/
+          echo ""
+          echo "== Struktur folder =="
+          find ak3-build/ -maxdepth 2 -type f | head -20
+          echo ""
+          echo "Artifact name yang akan diupload: $ARTIFACT_NAME"
+          echo "Setelah download dari GitHub, file akan bernama: ${ARTIFACT_NAME}.zip"
+
+      # ============================================================
+      # STEP 5: Generate changelog
+      # ============================================================
+      - name: 9. Generate Changelog Otomatis
+        run: |
+          # Extract dari metadata JSON (nested structure workflow 3)
+          if [ -f "build-metadata.json" ]; then
+            KERNEL_SOURCE=$(python3 -c "import json; d=json.load(open('build-metadata.json')); print(d.get('kernel',{}).get('source','unknown'))")
+            KERNEL_BRANCH=$(python3 -c "import json; d=json.load(open('build-metadata.json')); print(d.get('kernel',{}).get('branch','unknown'))")
+            KERNEL_COMMIT=$(python3 -c "import json; d=json.load(open('build-metadata.json')); print(d.get('kernel',{}).get('commit','unknown'))")
+            KERNEL_VERSION=$(python3 -c "import json; d=json.load(open('build-metadata.json')); print(d.get('kernel',{}).get('version','unknown'))")
+
+            RESUKISU_BRANCH=$(python3 -c "import json; d=json.load(open('build-metadata.json')); print(d.get('resukisu',{}).get('branch','unknown'))")
+            RESUKISU_COMMIT=$(python3 -c "import json; d=json.load(open('build-metadata.json')); print(d.get('resukisu',{}).get('commit','unknown'))")
+            RESUKISU_VERSION_CODE=$(python3 -c "import json; d=json.load(open('build-metadata.json')); print(d.get('resukisu',{}).get('version_code','unknown'))")
+            RESUKISU_VERSION_NAME=$(python3 -c "import json; d=json.load(open('build-metadata.json')); print(d.get('resukisu',{}).get('version_name','unknown'))")
+
+            SUSFS_BRANCH=$(python3 -c "import json; d=json.load(open('build-metadata.json')); print(d.get('susfs',{}).get('branch','unknown'))")
+            SUSFS_COMMIT=$(python3 -c "import json; d=json.load(open('build-metadata.json')); print(d.get('susfs',{}).get('commit','unknown'))")
+            SUSFS_VERSION=$(python3 -c "import json; d=json.load(open('build-metadata.json')); print(d.get('susfs',{}).get('version','unknown'))")
+            SUSFS_PATCH_URL=$(python3 -c "import json; d=json.load(open('build-metadata.json')); print(d.get('susfs',{}).get('patch_url','unknown'))")
+
+            CLANG_URL=$(python3 -c "import json; d=json.load(open('build-metadata.json')); print(d.get('toolchain',{}).get('clang_url','unknown'))")
+            BUILD_DATE_SRC=$(python3 -c "import json; print(json.load(open('build-metadata.json')).get('build_date','unknown'))")
+          else
+            KERNEL_SOURCE="unknown"
+            KERNEL_BRANCH="unknown"
+            KERNEL_COMMIT="unknown"
+            KERNEL_VERSION="unknown"
+            RESUKISU_BRANCH="unknown"
+            RESUKISU_COMMIT="unknown"
+            RESUKISU_VERSION_CODE="unknown"
+            RESUKISU_VERSION_NAME="unknown"
+            SUSFS_BRANCH="unknown"
+            SUSFS_COMMIT="unknown"
+            SUSFS_VERSION="unknown"
+            SUSFS_PATCH_URL="unknown"
+            CLANG_URL="unknown"
+            BUILD_DATE_SRC="unknown"
+          fi
+
+          ZIP_DATE=$(date -u '+%Y-%m-%d %H:%M UTC')
+
+          cat > CHANGELOG.md << EOF
+          # 📦 BOS Beryllium + ReSukiSU + SUSFS
+
+          **Kernel compile:** ${BUILD_DATE_SRC}
+          **ZIP dibuat:** ${ZIP_DATE}
+          **Artifact file:** \`${ARTIFACT_NAME}.zip\`
+
+          ---
+
+          ## 🔧 Kernel Base
+          | Field | Value |
+          |-------|-------|
+          | Source | ${KERNEL_SOURCE} |
+          | Branch | \`${KERNEL_BRANCH}\` |
+          | Commit | \`${KERNEL_COMMIT}\` |
+          | Version | \`${KERNEL_VERSION}\` |
+
+          ## 🌱 ReSukiSU
+          | Field | Value |
+          |-------|-------|
+          | Branch | \`${RESUKISU_BRANCH}\` |
+          | Commit | \`${RESUKISU_COMMIT}\` |
+          | Version Code | \`${RESUKISU_VERSION_CODE}\` |
+          | Version Name | \`${RESUKISU_VERSION_NAME}\` |
+
+          ## 🛡️ SUSFS
+          | Field | Value |
+          |-------|-------|
+          | Version | \`${SUSFS_VERSION}\` |
+          | Branch | \`${SUSFS_BRANCH}\` |
+          | Commit | \`${SUSFS_COMMIT}\` |
+          | Patch URL | ${SUSFS_PATCH_URL} |
+
+          ## 🧩 Toolchain
+          - **Clang:** ${CLANG_URL}
+          - **AnyKernel3:** template resmi terbaru dari osm0sis/AnyKernel3
+
+          ## 📱 Manager APK (dipilih: **${MANAGER_NAME}**)
+          ${MANAGER_STATUS}
+
+          **Download Manager APK:** ${MANAGER_RELEASE_URL}
+
+          > **Info Manager Compatibility:**
+          > ReSukiSU v4.1+ mendukung 5 manager unofficial:
+          > - **ReSukiSU** (rekomendasi, native support penuh)
+          > - **SukiSU-Ultra**
+          > - **MKSU**
+          > - **RKSU**
+          > - **KOWSU**
+          >
+          > Semuanya kompatibel dengan kernel ini. Pilih sesuai preferensi UI/fitur.
+
+          ---
+
+          ## 📥 File dalam ZIP ini
+          - \`Image.gz-dtb\` — kernel image + device tree
+          - \`anykernel.sh\` — script AnyKernel3 (di-patch untuk beryllium)
+          - \`META-INF/\`, \`tools/\` — AnyKernel3 support files
+
+          ## 🚀 Cara Pasang
+
+          ### ⚠️ PENTING: Sebelum flash
+          1. **Backup boot.img asli** dulu via TWRP → Backup → Boot
+          2. **Uninstall semua module** dari kernel manager lama (jika sebelumnya pakai KSU-Next atau Magisk)
+          3. **Restore boot.img asli** (unroot) untuk clean state
+          4. Baru flash kernel baru
+
+          ### Langkah flash:
+          1. Reboot ke recovery (TWRP / OrangeFox)
+          2. Flash \`${ARTIFACT_NAME}.zip\`
+          3. Wipe Dalvik Cache (opsional, disarankan)
+          4. Reboot ke system
+          5. Install ${MANAGER_NAME} Manager APK dari link di atas
+          6. Buka Manager → verifikasi status **"Working"** / **"Enabled"**
+          7. Buka tab SUSFS → verifikasi versi **${SUSFS_VERSION}** terdeteksi
+
+          ### Setelah booted:
+          - **Configure SUSFS** via Manager (SUS Path, SUS Mount, dll)
+          - **Install module** yang dibutuhkan (satu per satu, jangan langsung banyak)
+          - **Test Play Integrity** dengan aplikasi "Play Integrity API Checker"
+
+          ---
+
+          ## 🔗 Referensi
+          - Build workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.inputs.compile_run_id }}
+          - ReSukiSU repo: https://github.com/ReSukiSU/ReSukiSU
+          - SUSFS repo: https://gitlab.com/simonpunk/susfs4ksu
+          - BaikalOS kernel: ${KERNEL_SOURCE}
+
+          ---
+
+          _Generated automatically by GitHub Actions workflow #4_
+          EOF
+
+          echo "== CHANGELOG.md =="
+          cat CHANGELOG.md
+
+      # ============================================================
+      # STEP 6: Upload artifacts (auto-zip oleh GitHub, tanpa double zip)
+      # ============================================================
+      - name: 10. Upload Flashable ZIP (auto-zip GitHub)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ak3-build/**
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: 11. Upload Changelog
+        uses: actions/upload-artifact@v4
+        with:
+          name: CHANGELOG-${{ github.event.inputs.zip_name }}
+          path: CHANGELOG.md
+          retention-days: 30
+          if-no-files-found: warn
+
+      # ============================================================
+      # STEP 7: Build summary
+      # ============================================================
+      - name: 12. Generate build summary
+        if: always()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # 📦 Flashable ZIP Build Summary
+
+          | Field | Value |
+          |-------|-------|
+          | **Artifact Name** | \`${ARTIFACT_NAME}\` |
+          | **Download File** | \`${ARTIFACT_NAME}.zip\` (langsung flashable) |
+          | **Kernel** | BaikalOS 13.0 + ReSukiSU + SUSFS |
+          | **Device** | Poco F1 (beryllium) |
+          | **Manager** | ${MANAGER_NAME} |
+          | **Compile Run** | [#${{ github.event.inputs.compile_run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.inputs.compile_run_id }}) |
+
+          ## 📱 Manager APK Download
+          👉 ${MANAGER_RELEASE_URL}
+
+          ## 🚀 Ready to Flash!
+          1. Download artifact \`${ARTIFACT_NAME}\` di atas
+          2. File yang di-download langsung berupa \`.zip\` yang **flashable** (tidak perlu extract dulu)
+          3. Transfer ke HP → boot ke TWRP → flash
+
+          ⚠️ **Sebelum flash**: backup boot.img asli dan uninstall root lama!
+          EOF

@@ -1,0 +1,613 @@
+name: 3. Compile Kernel - BOS Beryllium + ReSukiSU + SUSFS (7 hooks complete)
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_name:
+        description: 'Nama Build'
+        required: true
+        default: 'bos-beryllium-resukisu-susfs-v6'
+      kernel_source:
+        description: 'Kernel Source'
+        required: true
+        default: 'https://github.com/baikalos/android_kernel_xiaomi_sdm845.git'
+      kernel_branch:
+        description: 'Kernel Branch'
+        required: true
+        default: '13.0'
+      defconfig:
+        description: 'defconfig path'
+        required: true
+        default: 'vendor/xiaomi/mi845_defconfig'
+      use_extracted_config:
+        description: 'Pakai extracted config?'
+        required: true
+        default: 'true'
+      resukisu_repo:
+        description: 'ReSukiSU repo URL'
+        required: true
+        default: 'https://github.com/ReSukiSU/ReSukiSU'
+      resukisu_branch:
+        description: 'ReSukiSU branch/tag/commit'
+        required: true
+        default: 'main'
+      susfs_repo:
+        description: 'SUSFS repo URL'
+        required: true
+        default: 'https://gitlab.com/simonpunk/susfs4ksu.git'
+      susfs_branch:
+        description: 'SUSFS branch'
+        required: true
+        default: 'kernel-4.9'
+      susfs_patch_url:
+        description: 'SUSFS patch URL'
+        required: true
+        default: 'https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.9.patch'
+      clang_url:
+        description: 'Clang prebuilt'
+        required: false
+        default: 'https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r487747c.tar.gz'
+
+env:
+  KBUILD_BUILD_USER: "tan"
+  KBUILD_BUILD_HOST: "ardiansyah"
+  ARCH: arm64
+
+jobs:
+  build:
+    name: ${{ github.event.inputs.zip_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+
+      - name: 1. Checkout
+        uses: actions/checkout@v4
+
+      - name: 2. Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc build-essential flex bison ca-certificates clang lld llvm \
+            libssl-dev libelf-dev cpio curl git unzip wget python3 python-is-python3 \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            g++-aarch64-linux-gnu g++-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+            libncurses5-dev libncursesw5-dev patch jq
+
+      - name: 3. Setup Clang cache
+        id: clang-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/clang-ext
+          key: clang-${{ github.event.inputs.clang_url }}
+
+      - name: 4. Download Clang
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/clang-ext
+          curl -Lo clang.tar.gz "${{ github.event.inputs.clang_url }}"
+          tar -xzf clang.tar.gz -C ~/clang-ext
+          rm -f clang.tar.gz
+
+      - name: 5. Add Clang to PATH
+        run: echo "$HOME/clang-ext/bin" >> $GITHUB_PATH
+
+      - name: 6. Clone kernel
+        run: |
+          git clone --depth=1 \
+            "${{ github.event.inputs.kernel_source }}" \
+            -b "${{ github.event.inputs.kernel_branch }}" \
+            kernel-src
+
+      - name: 7. Setup ReSukiSU
+        run: |
+          cd kernel-src
+          RAW_BASE="$(echo "${{ github.event.inputs.resukisu_repo }}" | sed 's|github.com|raw.githubusercontent.com|')"
+          SETUP_OK=0
+
+          if curl -LSsf "${RAW_BASE}/${{ github.event.inputs.resukisu_branch }}/kernel/setup.sh" \
+              | bash -s "${{ github.event.inputs.resukisu_branch }}"; then
+            SETUP_OK=1
+          fi
+
+          if [ "$SETUP_OK" -ne 1 ]; then
+            git clone --depth=1 -b "${{ github.event.inputs.resukisu_branch }}" \
+              "${{ github.event.inputs.resukisu_repo }}" .resukisu-src
+            [ -f .resukisu-src/kernel/setup.sh ] && \
+              bash .resukisu-src/kernel/setup.sh "${{ github.event.inputs.resukisu_branch }}" && SETUP_OK=1
+          fi
+
+          [ "$SETUP_OK" -eq 1 ] || exit 1
+
+          if [ ! -d .resukisu-src ]; then
+            git clone --depth=1 -b "${{ github.event.inputs.resukisu_branch }}" \
+              "${{ github.event.inputs.resukisu_repo }}" .resukisu-src
+          fi
+
+      # ============================================================
+      # STEP 8: Generate ksu_hook.h dari signature ASLI (7 hooks)
+      # ============================================================
+      - name: 8. Generate ksu_hook.h (7 hooks - signature ASLI)
+        run: |
+          cd kernel-src
+
+          python3 << 'PYEOF'
+          import re
+          from pathlib import Path
+
+          ksu_dirs = ['KernelSU', 'KernelSU-Next', 'ReSukiSU']
+          ksu_dir = next((d for d in ksu_dirs if Path(d).exists()), None)
+          if not ksu_dir:
+              print("[FAIL] KSU source dir not found")
+              exit(1)
+
+          signatures = {}
+          for pattern in ['*.c', '*.h']:
+              for f in Path(ksu_dir).rglob(pattern):
+                  try:
+                      text = f.read_text(errors='replace')
+                  except:
+                      continue
+                  for m in re.finditer(
+                      r'\b(?:int|void)\s+(ksu_handle_\w+)\s*\(([^)]*)\)\s*[;{]',
+                      text, re.MULTILINE
+                  ):
+                      name = m.group(1)
+                      params = m.group(2).strip()
+                      full_match = m.group(0)
+                      rettype = 'int' if full_match.strip().startswith('int') else 'void'
+                      if name == 'ksu_handle_stat':
+                          if 'const char __user' in params:
+                              signatures[name] = (rettype, params)
+                          elif name not in signatures:
+                              signatures[name] = (rettype, params)
+                      else:
+                          if name not in signatures or '{' in text[m.end()-1:m.end()]:
+                              signatures[name] = (rettype, params)
+
+          # 7 hook WAJIB yang harus di-inject di kernel source
+          wajib_hooks = {
+              'ksu_handle_execveat',
+              'ksu_handle_faccessat',
+              'ksu_handle_stat',
+              'ksu_handle_sys_read',
+              'ksu_handle_setresuid',
+              'ksu_handle_sys_reboot',
+              'ksu_handle_input_handle_event',
+          }
+
+          print(f"Total extracted: {len(signatures)}")
+          print()
+
+          header = [
+              '/* Auto-generated ksu_hook.h - 7 hook wajib (signature ASLI) */',
+              '#ifndef __KSU_HOOK_H',
+              '#define __KSU_HOOK_H',
+              '',
+              '#include <linux/types.h>',
+              '#include <linux/uidgid.h>',
+              '',
+              'struct file;',
+              'struct filename;',
+              '',
+          ]
+
+          for name in sorted(wajib_hooks):
+              if name in signatures:
+                  rettype, params = signatures[name]
+                  header.append(f'extern {rettype} {name}({params});')
+                  print(f"  ✓ {rettype} {name}({params})")
+              else:
+                  print(f"  ⚠ Missing in source: {name}")
+
+          header.append('')
+          header.append('#endif')
+
+          Path('include/linux/ksu_hook.h').write_text('\n'.join(header))
+          print()
+          print("== Contents ==")
+          print(Path('include/linux/ksu_hook.h').read_text())
+          PYEOF
+
+      # ============================================================
+      # STEP 9: Clone SUSFS & apply patch
+      # ============================================================
+      - name: 9. Clone SUSFS & apply patch
+        run: |
+          cd kernel-src
+          set -e
+          git clone --depth=1 -b "${{ github.event.inputs.susfs_branch }}" \
+            "${{ github.event.inputs.susfs_repo }}" .susfs4ksu
+          curl -LSsf "${{ github.event.inputs.susfs_patch_url }}" -o /tmp/susfs.patch
+
+          set +e
+          patch -p1 --fuzz=3 --no-backup-if-mismatch --force < /tmp/susfs.patch 2>&1 | tee /tmp/susfs.log
+          set -e
+
+          find . -name "*.rej" -not -path "./.susfs4ksu/*" -delete 2>/dev/null || true
+          find . -name "*.orig" -not -path "./.susfs4ksu/*" -delete 2>/dev/null || true
+
+          if [ ! -f fs/sus_su.c ] && [ -f .susfs4ksu/kernel_patches/fs/sus_su.c ]; then
+            cp .susfs4ksu/kernel_patches/fs/sus_su.c fs/sus_su.c
+          fi
+
+      # ============================================================
+      # STEP 10: Manual fix SUSFS hunks
+      # ============================================================
+      - name: 10. Manual fix SUSFS hunks
+        run: |
+          cd kernel-src
+
+          if [ -f fs/proc_namespace.c ] && ! grep -q "susfs_def.h" fs/proc_namespace.c; then
+            sed -i '/#include "proc\/internal.h"/a\
+          #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
+          #include <linux/susfs_def.h>\
+          #endif' fs/proc_namespace.c
+          fi
+
+          if [ -f fs/stat.c ] && ! grep -q "int err = inode->i_op->getattr" fs/stat.c; then
+            python3 << 'PYEOF'
+          import re
+          from pathlib import Path
+          p = Path("fs/stat.c")
+          text = p.read_text()
+          pattern = re.compile(
+              r'(\tif\s*\(inode->i_op->getattr\)\s*\n)'
+              r'(\t\treturn inode->i_op->getattr\(path->mnt,\s*path->dentry,\s*stat\);)',
+              re.MULTILINE
+          )
+          replacement = (
+              r'\1'
+              '#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n\t{\n'
+              '\t\tint err = inode->i_op->getattr(path->mnt, path->dentry, stat);\n'
+              '\t\tif (!err)\n'
+              '\t\t\tsusfs_sus_kstat_spoof_generic_fillattr(inode, stat);\n'
+              '\t\treturn err;\n\t}\n#else\n' r'\2' '\n#endif'
+          )
+          new_text, n = pattern.subn(replacement, text)
+          if n > 0:
+              p.write_text(new_text)
+          PYEOF
+          fi
+
+          python3 << 'PYEOF'
+          from pathlib import Path
+          for filepath in ["fs/open.c", "fs/stat.c", "fs/proc_namespace.c", "fs/proc/task_mmu.c", "fs/proc/cmdline.c"]:
+              p = Path(filepath)
+              if not p.exists(): continue
+              lines = p.read_text().split('\n')
+              has_susfs = any('linux/susfs.h' in l for l in lines)
+              has_susfs_def = any('linux/susfs_def.h' in l for l in lines)
+              if has_susfs and has_susfs_def: continue
+              insert_idx = -1
+              for i, line in enumerate(lines):
+                  if line.strip().startswith('#include'):
+                      insert_idx = i; break
+              if insert_idx == -1: continue
+              new_includes = []
+              if not has_susfs: new_includes.append('#include <linux/susfs.h>')
+              if not has_susfs_def: new_includes.append('#include <linux/susfs_def.h>')
+              lines[insert_idx:insert_idx] = new_includes
+              p.write_text('\n'.join(lines))
+          PYEOF
+
+          if [ -f fs/proc_namespace.c ] && ! grep -q "extern bool susfs_is_current_ksu_domain" fs/proc_namespace.c; then
+            python3 << 'PYEOF'
+          from pathlib import Path
+          p = Path("fs/proc_namespace.c")
+          lines = p.read_text().split('\n')
+          new_lines = []
+          inserted = False
+          for line in lines:
+              new_lines.append(line)
+              if not inserted and '#include "internal.h"' in line:
+                  new_lines.extend(['', '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT',
+                      'extern bool susfs_is_current_ksu_domain(void);',
+                      'extern bool susfs_hide_sus_mnts_for_non_su_procs;',
+                      '#endif', ''])
+                  inserted = True
+          p.write_text('\n'.join(new_lines))
+          PYEOF
+          fi
+
+          if [ -f fs/stat.c ] && ! grep -q "extern void susfs_sus_kstat_spoof_generic_fillattr" fs/stat.c; then
+            python3 << 'PYEOF'
+          from pathlib import Path
+          p = Path("fs/stat.c")
+          lines = p.read_text().split('\n')
+          last_include = -1
+          for i, line in enumerate(lines):
+              if line.strip().startswith('#include'): last_include = i
+          if last_include >= 0:
+              lines[last_include+1:last_include+1] = ['', '#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT',
+                  'extern void susfs_sus_kstat_spoof_generic_fillattr(struct inode *inode, struct kstat *stat);',
+                  '#endif', '']
+              p.write_text('\n'.join(lines))
+          PYEOF
+          fi
+
+          if [ -f fs/stat.c ] && grep -q "^EXPORT_SYMBOL(vfs_getattr_nosec);$" fs/stat.c; then
+            python3 << 'PYEOF'
+          from pathlib import Path
+          p = Path("fs/stat.c")
+          lines = p.read_text().split('\n')
+          new_lines = []
+          i = 0
+          removed = False
+          while i < len(lines):
+              line = lines[i]
+              new_lines.append(line)
+              if (not removed and line.strip() == 'EXPORT_SYMBOL(vfs_getattr_nosec);' and i + 3 < len(lines)):
+                  if (lines[i+1].strip() == '#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT'
+                      and 'susfs_sus_kstat_spoof_generic_fillattr' in lines[i+2].strip()
+                      and lines[i+3].strip() == '#endif'):
+                      i += 4; removed = True; continue
+              i += 1
+          if removed: p.write_text('\n'.join(new_lines))
+          PYEOF
+          fi
+
+      # ============================================================
+      # STEP 11: Inject 7 hook WAJIB dengan signature ASLI
+      # ============================================================
+      - name: 11. Apply 7 hook WAJIB (signature ASLI dari source)
+        run: |
+          cd kernel-src
+
+          inject_hook() {
+            local file="$1"
+            local func_pat="$2"
+            local hook_line="$3"
+            [ -f "$file" ] || return 1
+            awk -v pat="$func_pat" -v hook="$hook_line" '
+              $0 ~ pat { in_func=1 }
+              in_func && /^\{/ && !done {
+                print
+                print "\t/* ReSukiSU hook */"
+                print "\t" hook
+                done=1; in_func=0; next
+              }
+              { print }
+            ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+          }
+
+          add_include() {
+            local file="$1"
+            [ -f "$file" ] || return
+            if ! grep -q "linux/ksu_hook.h" "$file"; then
+              sed -i '0,/^#include/s||#include <linux/ksu_hook.h>\n&|' "$file"
+            fi
+          }
+
+          # 1. execveat
+          # signature: int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
+          #                                    void *argv, void *envp, int *flags)
+          add_include fs/exec.c
+          if ! grep -q "ksu_handle_execveat" fs/exec.c; then
+            inject_hook fs/exec.c "static int do_execveat_common" \
+              "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"
+            if ! grep -q "ksu_handle_execveat" fs/exec.c; then
+              inject_hook fs/exec.c "int do_execveat_common" \
+                "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"
+            fi
+          fi
+
+          # 2. faccessat
+          # signature: int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
+          #                                     int *mode, int *__unused_flags)
+          add_include fs/open.c
+          if ! grep -q "ksu_handle_faccessat" fs/open.c; then
+            inject_hook fs/open.c "SYSCALL_DEFINE3.faccessat" \
+              "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"
+          fi
+
+          # 3. stat
+          # signature: int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags)
+          # Note: kernel 4.9 pakai 'flag' (singular), bukan 'flags'
+          add_include fs/stat.c
+          if ! grep -q "ksu_handle_stat" fs/stat.c; then
+            inject_hook fs/stat.c "SYSCALL_DEFINE4.newfstatat" \
+              "ksu_handle_stat(&dfd, &filename, &flag);"
+          fi
+
+          # 4. sys_read
+          # signature: int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr,
+          #                                    size_t *count_ptr)
+          add_include fs/read_write.c
+          if ! grep -q "ksu_handle_sys_read" fs/read_write.c; then
+            inject_hook fs/read_write.c "SYSCALL_DEFINE3.read" \
+              "ksu_handle_sys_read(fd, &buf, &count);"
+          fi
+
+          # 5. setresuid
+          # signature: int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
+          add_include kernel/sys.c
+          if ! grep -q "ksu_handle_setresuid" kernel/sys.c; then
+            inject_hook kernel/sys.c "SYSCALL_DEFINE3.setresuid" \
+              "ksu_handle_setresuid(ruid, euid, suid);"
+          fi
+
+          # 6. sys_reboot
+          # signature: int ksu_handle_sys_reboot(int magic1, int magic2,
+          #                                      unsigned int cmd, void __user **arg)
+          add_include kernel/reboot.c
+          if [ -f kernel/reboot.c ] && ! grep -q "ksu_handle_sys_reboot" kernel/reboot.c; then
+            inject_hook kernel/reboot.c "SYSCALL_DEFINE4.reboot" \
+              "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);"
+          fi
+
+          # 7. input_handle_event
+          # signature: int ksu_handle_input_handle_event(unsigned int *type,
+          #                                              unsigned int *code, int *value)
+          # drivers/input/input.c: void input_handle_event(struct input_dev *dev,
+          #                                                 unsigned int type,
+          #                                                 unsigned int code, int value)
+          # local vars: type, code, value → &type, &code, &value
+          add_include drivers/input/input.c
+          if ! grep -q "ksu_handle_input_handle_event" drivers/input/input.c; then
+            inject_hook drivers/input/input.c "void input_handle_event" \
+              "ksu_handle_input_handle_event(&type, &code, &value);"
+            # Fallback kalau static
+            if ! grep -q "ksu_handle_input_handle_event" drivers/input/input.c; then
+              inject_hook drivers/input/input.c "static void input_handle_event" \
+                "ksu_handle_input_handle_event(&type, &code, &value);"
+            fi
+          fi
+
+          echo "== Verifikasi 7 hook wajib =="
+          for f in fs/exec.c fs/open.c fs/stat.c fs/read_write.c kernel/sys.c kernel/reboot.c drivers/input/input.c; do
+            [ -f "$f" ] || continue
+            HOOKS=$(grep -o "ksu_handle_[a-z_]*" "$f" 2>/dev/null | sort -u | tr '\n' ' ')
+            echo "  $f -> ${HOOKS:-NONE}"
+          done
+
+      - name: 12. Prepare defconfig
+        run: |
+          cd kernel-src
+          DEFCONFIG_PATH="arch/arm64/configs/${{ github.event.inputs.defconfig }}"
+
+          if [ "${{ github.event.inputs.use_extracted_config }}" = "true" ]; then
+            EXTRACTED_CFG="$GITHUB_WORKSPACE/extracted-config/my_defconfig.txt"
+            [ -f "$EXTRACTED_CFG" ] && cp "$EXTRACTED_CFG" "$DEFCONFIG_PATH"
+          fi
+
+          sed -i '/^CONFIG_KSU/d;/^# CONFIG_KSU is not set/d;/SUSFS/d;/^CONFIG_KSU_KPROBE_HOOKS/d' "$DEFCONFIG_PATH"
+
+          {
+            echo ""
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KPROBES=y"
+            echo "CONFIG_KPROBE_EVENTS=y"
+            echo "CONFIG_KSU_SUSFS=y"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
+            echo "CONFIG_OVERLAY_FS=y"
+            echo "CONFIG_TMPFS_XATTR=y"
+            echo "CONFIG_TMPFS_POSIX_ACL=y"
+          } >> "$DEFCONFIG_PATH"
+
+      - name: 13. Patch Makefile
+        run: |
+          cd kernel-src
+          sed -i -E 's@(CLANG_PREFIX32[[:space:]]*:=[[:space:]]*--prefix=\$\(GCC_TOOLCHAIN32_DIR\))[[:space:]]*$@\1$(notdir $(CROSS_COMPILE_ARM32))@' arch/arm64/Makefile
+
+      - name: 14. Skip broken DTBs
+        run: |
+          cd kernel-src
+          DTS_MK="arch/arm64/boot/dts/qcom/Makefile"
+          [ -f "$DTS_MK" ] || exit 0
+          for dtb in sdm845-v2-qvr-evt.dtb sdm845-v2-qvr-dvt.dtb sdm845-interposer-sdm670-mtp.dtb sdm845-interposer-sdm670-cdp.dtb; do
+            sed -i "/$dtb/d" "$DTS_MK"
+          done
+
+      - name: 15. Compile
+        run: |
+          cd kernel-src
+          OUT_DIR="out"
+          export PATH="$HOME/clang-ext/bin:$PATH"
+
+          MAKE_ARGS=(
+            O=$OUT_DIR ARCH=arm64 CC=clang LD=ld.lld
+            AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            LLVM=1 LLVM_IAS=1
+          )
+
+          mkdir -p $OUT_DIR
+          make "${MAKE_ARGS[@]}" ${{ github.event.inputs.defconfig }}
+          make "${MAKE_ARGS[@]}" olddefconfig
+
+          set +e
+          make -k -j$(nproc --all) "${MAKE_ARGS[@]}" 2>&1 | tee build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          set -e
+
+          BUILD_OK=0
+          if [ -f "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" ]; then
+            ls -la "$OUT_DIR/arch/arm64/boot/Image.gz-dtb"; BUILD_OK=1
+          fi
+          echo "BUILD_OK=$BUILD_OK" >> "$GITHUB_ENV"
+          [ "$BUILD_OK" -eq 1 ] || exit 1
+
+      - name: 16. Extract versions
+        if: always()
+        run: |
+          cd kernel-src
+          RESUKISU_CODE=$(grep -oP "ReSukiSU version code:\s*\K[0-9]+" build.log | head -1 || echo "unknown")
+          RESUKISU_NAME=$(grep -oP "ReSukiSU version name:\s*\K\S+" build.log | head -1 || echo "unknown")
+          SUSFS_VER=$(grep -oP "SUSFS_VERSION:\s*\Kv[0-9.]+" build.log | head -1 || echo "unknown")
+          echo "RESUKISU_VERSION_CODE=${RESUKISU_CODE}" >> "$GITHUB_ENV"
+          echo "RESUKISU_VERSION_NAME=${RESUKISU_NAME}" >> "$GITHUB_ENV"
+          echo "SUSFS_VERSION=${SUSFS_VER}" >> "$GITHUB_ENV"
+
+      - name: 17. Capture metadata
+        if: env.BUILD_OK == '1'
+        run: |
+          cd kernel-src
+          KERNEL_COMMIT=$(git rev-parse --short HEAD)
+          RESUKISU_COMMIT="unknown"
+          [ -d KernelSU ] && RESUKISU_COMMIT=$(cd KernelSU && git rev-parse --short HEAD 2>/dev/null || echo "embedded")
+          [ -d .resukisu-src ] && [ "$RESUKISU_COMMIT" = "unknown" ] && \
+            RESUKISU_COMMIT=$(cd .resukisu-src && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+          SUSFS_COMMIT=$(cd .susfs4ksu && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+          cat > ../build-metadata.json << JSONEOF
+          {
+            "build_date": "$(date -u '+%Y-%m-%d %H:%M UTC')",
+            "kernel": {
+              "source": "${{ github.event.inputs.kernel_source }}",
+              "branch": "${{ github.event.inputs.kernel_branch }}",
+              "commit": "${KERNEL_COMMIT}",
+              "version": "$(cat out/include/config/kernel.release)",
+              "defconfig": "${{ github.event.inputs.defconfig }}"
+            },
+            "resukisu": {
+              "repo": "${{ github.event.inputs.resukisu_repo }}",
+              "branch": "${{ github.event.inputs.resukisu_branch }}",
+              "commit": "${RESUKISU_COMMIT}",
+              "version_code": "${RESUKISU_VERSION_CODE}",
+              "version_name": "${RESUKISU_VERSION_NAME}"
+            },
+            "susfs": {
+              "branch": "${{ github.event.inputs.susfs_branch }}",
+              "commit": "${SUSFS_COMMIT}",
+              "version": "${SUSFS_VERSION}"
+            }
+          }
+          JSONEOF
+          cat ../build-metadata.json | jq .
+
+      - name: 18. Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: kernel-src/build.log
+          retention-days: 7
+
+      - name: 19. Upload Image
+        if: env.BUILD_OK == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.zip_name }}-gz-dtb
+          path: kernel-src/out/arch/arm64/boot/Image.gz-dtb
+          retention-days: 30
+
+      - name: 20. Upload metadata
+        if: env.BUILD_OK == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metadata
+          path: build-metadata.json
+          retention-days: 30
