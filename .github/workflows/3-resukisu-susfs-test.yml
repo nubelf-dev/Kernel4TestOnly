@@ -49,8 +49,8 @@ on:
         default: 'https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r487747c.tar.gz'
 
 env:
-  KBUILD_BUILD_USER: "tan"
-  KBUILD_BUILD_HOST: "ardiansyah"
+  KBUILD_BUILD_USER: "Nerf."
+  KBUILD_BUILD_HOST: "OldlineSSS"
   ARCH: arm64
 
 jobs:
