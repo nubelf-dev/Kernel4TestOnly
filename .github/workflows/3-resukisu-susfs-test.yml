@@ -46,7 +46,7 @@ on:
       clang_url:
         description: 'Clang prebuilt'
         required: false
-        default: 'https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r487747c.tar.gz'
+        default: 'https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz'
 
 env:
   KBUILD_BUILD_USER: "Nerf."
