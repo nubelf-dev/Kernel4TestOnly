@@ -26,7 +26,7 @@ on:
       ksu_tag:
         description: 'KernelSU-Next tag/commit'
         required: false
-        default: 'v3.3.0-enjoy'
+        default: 'v3.3.0'
       clang_url:
         description: 'Clang prebuilt'
         required: false
