@@ -86,7 +86,7 @@ jobs:
       - name: Setup KernelSU-Next (manual, non-GKI)
         run: |
           cd kernel-src
-          curl -LSs "https://raw.githubusercontent.com/ThRE-Team/KernelSU-Next/main/kernel/setup.sh" | bash -s "${{ github.event.inputs.ksu_tag }}"
+          curl -LSs "https://raw.githubusercontent.com/nubelf-dev/KernelSU-Next/manager/kernel/setup.sh" | bash -s "${{ github.event.inputs.ksu_tag }}"
 
           # Cek apakah symlink & Kconfig/Makefile berhasil ter-inject
           echo "== Cek symlink KSU =="
