@@ -1,4 +1,4 @@
-name: 1.a. Compile Kernel - -avatar - BOS Beryllium + KSU-Next
+name: 1.a. Compile Kernel - BOS Beryllium + KSU-Next - Avatar Fix
 
 on:
   workflow_dispatch:
