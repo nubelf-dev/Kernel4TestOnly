@@ -1,0 +1,323 @@
+name: Find APK by Hash or Commit (Universal)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_hash:
+        description: 'Target SHA256 hash APK signature (64 hex chars, kosongkan kalau pakai commit)'
+        required: false
+        default: ''
+      target_commit:
+        description: 'Target commit SHA (7-40 hex chars, kosongkan kalau pakai hash)'
+        required: false
+        default: ''
+      source_repo:
+        description: 'Source repo (owner/repo)'
+        required: true
+        default: 'KernelSU-Next/KernelSU-Next'
+      workflow_file:
+        description: 'Workflow file name (di source repo)'
+        required: true
+        default: 'build-manager.yml'
+      artifact_names:
+        description: 'Nama artifact yang di-download (comma-separated)'
+        required: true
+        default: 'manager,manager-spoofed'
+      max_runs:
+        description: 'Max runs to scan (kalau pakai hash)'
+        required: true
+        default: '50'
+      start_from:
+        description: 'Skip N run pertama'
+        required: true
+        default: '0'
+
+jobs:
+  find:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate input
+        run: |
+          TARGET_HASH="${{ github.event.inputs.target_hash }}"
+          TARGET_COMMIT="${{ github.event.inputs.target_commit }}"
+          
+          if [ -z "$TARGET_HASH" ] && [ -z "$TARGET_COMMIT" ]; then
+            echo "[ERROR] Isi salah satu: target_hash ATAU target_commit"
+            exit 1
+          fi
+          
+          if [ -n "$TARGET_HASH" ]; then
+            # Validasi format hash (64 hex lowercase)
+            if ! echo "$TARGET_HASH" | grep -qE '^[a-f0-9]{64}$'; then
+              echo "[ERROR] target_hash harus 64 hex chars lowercase"
+              echo "Diberikan: '$TARGET_HASH' (length: ${#TARGET_HASH})"
+              exit 1
+            fi
+            echo "[OK] Target hash: $TARGET_HASH"
+          fi
+          
+          if [ -n "$TARGET_COMMIT" ]; then
+            # Validasi format commit (7-40 hex)
+            if ! echo "$TARGET_COMMIT" | grep -qE '^[a-f0-9]{7,40}$'; then
+              echo "[ERROR] target_commit harus 7-40 hex chars lowercase"
+              exit 1
+            fi
+            echo "[OK] Target commit: $TARGET_COMMIT"
+          fi
+      
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apksigner openssl unzip
+      
+      - name: Search by commit (fast path)
+        if: github.event.inputs.target_commit != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TARGET_COMMIT="${{ github.event.inputs.target_commit }}"
+          SOURCE_REPO="${{ github.event.inputs.source_repo }}"
+          WORKFLOW="${{ github.event.inputs.workflow_file }}"
+          ARTIFACT_NAMES="${{ github.event.inputs.artifact_names }}"
+          
+          echo "== Fast path: search run for commit $TARGET_COMMIT =="
+          echo "Repo: $SOURCE_REPO"
+          echo "Workflow: $WORKFLOW"
+          
+          # Get all successful runs, filter by headSha starting with target_commit
+          RUN_ID=$(gh run list \
+            --repo "$SOURCE_REPO" \
+            --workflow "$WORKFLOW" \
+            --status success \
+            --limit 100 \
+            --json databaseId,headSha \
+            --jq ".[] | select(.headSha | startswith(\"$TARGET_COMMIT\")) | .databaseId" | head -1)
+          
+          if [ -z "$RUN_ID" ]; then
+            echo "[WARN] No successful run found for commit starting with $TARGET_COMMIT"
+            echo "[INFO] Fallback to hash search if hash provided"
+            echo "FASTPATH_FAILED=1" >> $GITHUB_ENV
+            exit 0
+          fi
+          
+          echo "[OK] Found run: $RUN_ID"
+          
+          # Download all specified artifacts
+          mkdir -p /tmp/found_apks
+          
+          IFS=',' read -ra ARTIFACTS <<< "$ARTIFACT_NAMES"
+          for ART in "${ARTIFACTS[@]}"; do
+            ART=$(echo "$ART" | xargs)  # trim whitespace
+            echo ""
+            echo "== Downloading artifact: $ART =="
+            
+            TMPDIR="/tmp/dl_$ART"
+            mkdir -p "$TMPDIR"
+            
+            if gh run download "$RUN_ID" --repo "$SOURCE_REPO" --name "$ART" --dir "$TMPDIR" 2>/dev/null; then
+              APK_FILES=$(find "$TMPDIR" -name "*.apk")
+              if [ -n "$APK_FILES" ]; then
+                for APK in $APK_FILES; do
+                  APK_NAME=$(basename "$APK")
+                  cp "$APK" "/tmp/found_apks/${ART}_${TARGET_COMMIT}_${APK_NAME}"
+                  
+                  # Show info
+                  HASH=$(apksigner verify --print-certs "$APK" 2>/dev/null | \
+                         grep -iP 'SHA-256.*:\s*\K[a-f0-9]+' | head -1 | tr '[:upper:]' '[:lower:]')
+                  echo "  [OK] $APK_NAME"
+                  echo "    SHA256: $HASH"
+                done
+              else
+                echo "  [WARN] No APK in artifact"
+              fi
+            else
+              echo "  [SKIP] Artifact '$ART' not available"
+            fi
+            
+            rm -rf "$TMPDIR"
+          done
+          
+          FOUND_COUNT=$(ls /tmp/found_apks/ 2>/dev/null | wc -l)
+          echo ""
+          echo "== Fast path result: $FOUND_COUNT APK(s) downloaded =="
+          echo "FOUND_COUNT=$FOUND_COUNT" >> $GITHUB_ENV
+          echo "FASTPATH_SUCCESS=1" >> $GITHUB_ENV
+      
+      - name: Search by hash (iterate runs)
+        if: github.event.inputs.target_hash != '' && env.FASTPATH_SUCCESS != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TARGET_HASH="${{ github.event.inputs.target_hash }}"
+          SOURCE_REPO="${{ github.event.inputs.source_repo }}"
+          WORKFLOW="${{ github.event.inputs.workflow_file }}"
+          ARTIFACT_NAMES="${{ github.event.inputs.artifact_names }}"
+          MAX_RUNS="${{ github.event.inputs.max_runs }}"
+          START_FROM="${{ github.event.inputs.start_from }}"
+          
+          echo "=========================================="
+          echo "== Search by hash =="
+          echo "Target hash: $TARGET_HASH"
+          echo "Repo: $SOURCE_REPO"
+          echo "Workflow: $WORKFLOW"
+          echo "Artifacts to try: $ARTIFACT_NAMES"
+          echo "Max runs: $MAX_RUNS, Skip: $START_FROM"
+          echo "=========================================="
+          echo ""
+          
+          # Get run list
+          gh run list \
+            --repo "$SOURCE_REPO" \
+            --workflow "$WORKFLOW" \
+            --status success \
+            --limit "$MAX_RUNS" \
+            --json databaseId,headSha,createdAt,headBranch \
+            --jq '.[] | "\(.databaseId)|\(.headSha[0:7])|\(.createdAt)|\(.headBranch)"' > /tmp/runs.txt
+          
+          TOTAL=$(wc -l < /tmp/runs.txt)
+          echo "Total runs: $TOTAL"
+          
+          # Apply start_from skip
+          if [ "$START_FROM" -gt 0 ]; then
+            tail -n +$((START_FROM + 1)) /tmp/runs.txt > /tmp/runs_skip.txt
+            mv /tmp/runs_skip.txt /tmp/runs.txt
+            REMAINING=$(wc -l < /tmp/runs.txt)
+            echo "After skip: $REMAINING"
+          fi
+          echo ""
+          
+          mkdir -p /tmp/found_apks
+          FOUND=0
+          COUNT=0
+          
+          IFS=',' read -ra ARTIFACTS <<< "$ARTIFACT_NAMES"
+          
+          while IFS='|' read -r RUN_ID SHA DATE BRANCH; do
+            COUNT=$((COUNT + 1))
+            echo "== [$COUNT] Run $RUN_ID (commit $SHA, $DATE) =="
+            
+            for ART in "${ARTIFACTS[@]}"; do
+              ART=$(echo "$ART" | xargs)  # trim
+              
+              TMPDIR="/tmp/run_${RUN_ID}_${ART}"
+              mkdir -p "$TMPDIR"
+              
+              if ! gh run download "$RUN_ID" --repo "$SOURCE_REPO" --name "$ART" --dir "$TMPDIR" 2>/dev/null; then
+                rm -rf "$TMPDIR"
+                continue
+              fi
+              
+              APK=$(find "$TMPDIR" -name "*.apk" | head -1)
+              
+              if [ -z "$APK" ]; then
+                rm -rf "$TMPDIR"
+                continue
+              fi
+              
+              # Extract SHA256
+              HASH=$(apksigner verify --print-certs "$APK" 2>/dev/null | \
+                     grep -iP 'SHA-256.*:\s*\K[a-f0-9]+' | head -1 | tr '[:upper:]' '[:lower:]')
+              
+              # Fallback: openssl
+              if [ -z "$HASH" ]; then
+                CERT_FILE=$(unzip -l "$APK" | grep -oP 'META-INF/\S+\.RSA' | head -1)
+                if [ -n "$CERT_FILE" ]; then
+                  HASH=$(unzip -p "$APK" "$CERT_FILE" 2>/dev/null | \
+                         openssl pkcs7 -inform DER -print_certs 2>/dev/null | \
+                         openssl x509 -outform DER 2>/dev/null | \
+                         sha256sum | cut -d' ' -f1)
+                fi
+              fi
+              
+              APK_NAME=$(basename "$APK")
+              echo "  [$ART] $APK_NAME"
+              echo "    SHA256: $HASH"
+              
+              if [ "$HASH" = "$TARGET_HASH" ]; then
+                echo ""
+                echo "  🎯 =========================="
+                echo "  🎯 MATCH FOUND!"
+                echo "  🎯 =========================="
+                echo "  Artifact: $ART"
+                echo "  Commit: $SHA"
+                echo "  Date: $DATE"
+                echo "  Branch: $BRANCH"
+                echo "  Run: https://github.com/$SOURCE_REPO/actions/runs/$RUN_ID"
+                echo ""
+                
+                cp "$APK" "/tmp/found_apks/${ART}_${SHA}_${APK_NAME}"
+                FOUND=1
+                
+                # Cari juga varian lain (misal spoofed) di run yang sama
+                for OTHER_ART in "${ARTIFACTS[@]}"; do
+                  OTHER_ART=$(echo "$OTHER_ART" | xargs)
+                  if [ "$OTHER_ART" != "$ART" ]; then
+                    echo "  == Also downloading: $OTHER_ART =="
+                    OTHER_DIR="/tmp/run_${RUN_ID}_${OTHER_ART}"
+                    mkdir -p "$OTHER_DIR"
+                    if gh run download "$RUN_ID" --repo "$SOURCE_REPO" --name "$OTHER_ART" --dir "$OTHER_DIR" 2>/dev/null; then
+                      OTHER_APK=$(find "$OTHER_DIR" -name "*.apk" | head -1)
+                      if [ -n "$OTHER_APK" ]; then
+                        OTHER_NAME=$(basename "$OTHER_APK")
+                        cp "$OTHER_APK" "/tmp/found_apks/${OTHER_ART}_${SHA}_${OTHER_NAME}"
+                        echo "    [OK] Also saved: $OTHER_NAME"
+                      fi
+                    fi
+                    rm -rf "$OTHER_DIR"
+                  fi
+                done
+                
+                rm -rf "$TMPDIR"
+                break 2  # Exit both loops
+              fi
+              
+              rm -rf "$TMPDIR"
+            done
+          done < /tmp/runs.txt
+          
+          echo ""
+          echo "=========================================="
+          if [ "$FOUND" -eq 1 ]; then
+            echo "✅ RESULT: MATCH FOUND"
+          else
+            echo "❌ RESULT: NOT FOUND in $COUNT scanned runs"
+            echo "   Try: increase max_runs OR different start_from"
+          fi
+          echo "=========================================="
+          
+          FOUND_COUNT=$(ls /tmp/found_apks/ 2>/dev/null | wc -l)
+          echo "FOUND_COUNT=$FOUND_COUNT" >> $GITHUB_ENV
+      
+      - name: List found APKs
+        if: env.FOUND_COUNT != '0' && env.FOUND_COUNT != ''
+        run: |
+          echo "== APKs downloaded =="
+          ls -la /tmp/found_apks/
+      
+      - name: Upload found APKs
+        if: env.FOUND_COUNT != '0' && env.FOUND_COUNT != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: matched-apks
+          path: /tmp/found_apks/*.apk
+          if-no-files-found: warn
+      
+      - name: Summary
+        if: always()
+        run: |
+          echo "## APK Search Result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -n "${{ github.event.inputs.target_commit }}" ]; then
+            echo "- **Search mode**: By commit \`${{ github.event.inputs.target_commit }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -n "${{ github.event.inputs.target_hash }}" ]; then
+            echo "- **Target hash**: \`${{ github.event.inputs.target_hash }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "- **Source repo**: ${{ github.event.inputs.source_repo }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Workflow**: ${{ github.event.inputs.workflow_file }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifacts tried**: ${{ github.event.inputs.artifact_names }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Found: ${{ env.FOUND_COUNT }} APK(s)**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download from artifact: **matched-apks**" >> $GITHUB_STEP_SUMMARY
