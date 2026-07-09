@@ -130,10 +130,18 @@ jobs:
           # tidak punya CONFIG_KSU_KPROBE_HOOKS):
           # https://kernelsu-next.github.io/webpage/pages/how-to-integrate-for-non-gki.html
           {
+          # Before
+          # echo "CONFIG_KSU=y"
+          # echo "CONFIG_KPROBES=y"
+          # echo "CONFIG_KPROBE_EVENTS=y"           # nama beda di 4.9 → di-drop tapi ga masalah
+          # echo "CONFIG_KSU_KPROBE_HOOKS=y"        # nama salah → di-drop tapi default y
+          # After
+          # Nama config BENAR sesuai Kconfig ThRE-Team KSU-Next v3.3.0-enjoy:
             echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_KPROBES_HOOK=y"
             echo "CONFIG_KPROBES=y"
-            echo "CONFIG_KPROBE_EVENTS=y"
-            echo "CONFIG_KSU_KPROBE_HOOKS=y"
+            echo "CONFIG_KRETPROBES=y"
+            echo "CONFIG_HAVE_SYSCALL_TRACEPOINTS=y"
           } >> "$DEFCONFIG_PATH"
           echo "Defconfig $DEFCONFIG_PATH berhasil dipatch dengan opsi KSU."
 
