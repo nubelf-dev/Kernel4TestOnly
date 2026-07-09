@@ -1,4 +1,4 @@
-name: 1.a. Compile Kernel - BOS Beryllium + KSU-Next - Avatar Fix
+name: 1.b. Compile Kernel - BOS Beryllium + KSU-Next - Avatar Fix
 
 on:
   workflow_dispatch:
@@ -139,6 +139,10 @@ jobs:
 
       - name: Override manager_list.h with custom Manager APK hashes
         run: |
+          echo "=== SKIP override untuk test kernel bersih ==="
+          exit 0
+          
+          # === Kode di bawah ini di-skip untuk test ===
           cd kernel-src
           
           echo "== Cari file manager_list.h yang di-inject KernelSU-Next =="
