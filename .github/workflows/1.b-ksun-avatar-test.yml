@@ -290,31 +290,37 @@ jobs:
           make "${MAKE_ARGS[@]}" ${{ github.event.inputs.defconfig }}
 
           # ========================================================
-          # FIX: Force inject config KSU LANGSUNG ke .config output
-          # sebelum olddefconfig. Ini lebih reliable daripada append
-          # ke defconfig source, karena kadang olddefconfig drop
-          # config yang tidak dikenal saat parse defconfig source.
+          # FIX v2: Force inject config KSU dengan NAMA CONFIG YANG BENAR
+          # Sesuai Kconfig KernelSU-Next v3.3.0-enjoy:
+          # https://github.com/ThRE-Team/KernelSU-Next/blob/v3.3.0-enjoy/kernel/Kconfig
+          #
+          # PENTING: Nama config yang BENAR adalah CONFIG_KSU_KPROBES_HOOK 
+          # (plural KPROBES + singular HOOK), BUKAN CONFIG_KSU_KPROBE_HOOKS.
           # ========================================================
           echo ""
-          echo "== Force inject config KSU ke .config output =="
+          echo "== Force inject config KSU (nama BENAR sesuai Kconfig KSU-Next) =="
           {
+            # Base KSU
             echo "CONFIG_KSU=y"
+            
+            # KSU_KPROBES_HOOK - untuk syscall hook (nama config benar!)
+            echo "CONFIG_KSU_KPROBES_HOOK=y"
+            
+            # Dependencies wajib untuk KSU_KPROBES_HOOK:
             echo "CONFIG_KPROBES=y"
+            echo "CONFIG_KRETPROBES=y"
+            echo "CONFIG_HAVE_SYSCALL_TRACEPOINTS=y"
+            
+            # Optional support
             echo "CONFIG_HAVE_KPROBES=y"
-            echo "CONFIG_KPROBE_EVENTS=y"
-            echo "CONFIG_KSU_KPROBE_HOOKS=y"
-            echo "CONFIG_KPROBES_ON_FTRACE=y"
-            echo "CONFIG_FUNCTION_TRACER=y"
-            echo "CONFIG_HAVE_FUNCTION_TRACER=y"
-            echo "CONFIG_HAVE_DYNAMIC_FTRACE=y"
-            echo "CONFIG_HAVE_DYNAMIC_FTRACE_WITH_REGS=y"
-            echo "CONFIG_DYNAMIC_FTRACE=y"
-            echo "CONFIG_DYNAMIC_FTRACE_WITH_REGS=y"
-            echo "CONFIG_OVERLAY_FS=y"
+            echo "CONFIG_HAVE_KRETPROBES=y"
+            echo "CONFIG_HAVE_REGS_AND_STACK_ACCESS_API=y"
             echo "CONFIG_KALLSYMS=y"
             echo "CONFIG_KALLSYMS_ALL=y"
-            echo "CONFIG_KPROBES_SANITY_TEST=n"
-            echo "CONFIG_OPTPROBES=y"
+            echo "CONFIG_OVERLAY_FS=y"
+            
+            # JANGAN aktifkan KSU_MANUAL_HOOK (akan disable KSU_KPROBES_HOOK)
+            echo "# CONFIG_KSU_MANUAL_HOOK is not set"
           } >> $OUT_DIR/.config
 
           make "${MAKE_ARGS[@]}" olddefconfig
@@ -322,7 +328,7 @@ jobs:
           echo ""
           echo "== VERIFIKASI FINAL: cek config KSU di .config setelah olddefconfig =="
           MISSING_COUNT=0
-          for cfg in CONFIG_KSU CONFIG_KPROBES CONFIG_KPROBE_EVENTS CONFIG_KSU_KPROBE_HOOKS CONFIG_KPROBES_ON_FTRACE CONFIG_OVERLAY_FS CONFIG_KALLSYMS_ALL; do
+          for cfg in CONFIG_KSU CONFIG_KPROBES CONFIG_KRETPROBES CONFIG_HAVE_SYSCALL_TRACEPOINTS CONFIG_KSU_KPROBES_HOOK CONFIG_OVERLAY_FS CONFIG_KALLSYMS_ALL; do
             if grep -q "^${cfg}=y" $OUT_DIR/.config; then
               echo "[OK] ${cfg}=y"
             else
@@ -332,10 +338,21 @@ jobs:
             fi
           done
           
+          echo ""
+          echo "== DEBUG: Semua config KSU di .config =="
+          grep -i "^CONFIG_KSU" $OUT_DIR/.config || echo "(tidak ada)"
+          
+          echo ""
+          echo "== DEBUG: Semua config KPROBE/KRETPROBE di .config =="
+          grep -i "kprobe\|kretprobe" $OUT_DIR/.config | head -20 || echo "(tidak ada)"
+          
           if [ "$MISSING_COUNT" -gt 0 ]; then
             echo ""
             echo "[WARNING] $MISSING_COUNT config wajib TIDAK aktif di .config final!"
             echo "Kernel akan compile tapi root subsystem mungkin tidak berfungsi."
+          else
+            echo ""
+            echo "[SUCCESS] Semua config wajib aktif! Root subsystem harus berfungsi."
           fi
 
           # -k (keep going): jangan berhenti total kalau satu target dtb gagal
