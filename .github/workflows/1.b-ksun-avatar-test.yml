@@ -1,4 +1,4 @@
-name: 1a. Compile Kernel - BOS Beryllium + KSU-Next + Test2
+name: 1.a. Compile Kernel - BOS Beryllium + KSU-Next - Avatar Fix
 
 on:
   workflow_dispatch:
@@ -136,6 +136,48 @@ jobs:
             echo "CONFIG_KSU_KPROBE_HOOKS=y"
           } >> "$DEFCONFIG_PATH"
           echo "Defconfig $DEFCONFIG_PATH berhasil dipatch dengan opsi KSU."
+
+      - name: Override manager_list.h with custom Manager APK hashes
+        run: |
+          cd kernel-src
+          
+          echo "== Cari file manager_list.h yang di-inject KernelSU-Next =="
+          find . -name "manager_list.h" 2>/dev/null | tee /tmp/manager_list_found.txt
+          
+          MANAGER_LIST=$(head -1 /tmp/manager_list_found.txt)
+          
+          if [ -z "$MANAGER_LIST" ] || [ ! -f "$MANAGER_LIST" ]; then
+            echo "ERROR: manager_list.h tidak ditemukan!"
+            echo "== Isi folder KernelSU-Next (untuk debug) =="
+            find . -type d -name "KernelSU-Next" -exec ls -la {} \;
+            echo "== Isi folder kernelsu symlink target =="
+            ls -la drivers/kernelsu/ 2>/dev/null || true
+            exit 1
+          fi
+          
+          echo "[INFO] Target file ditemukan: $MANAGER_LIST"
+          
+          CUSTOM_FILE="$GITHUB_WORKSPACE/custom-config/manager_list.h"
+          if [ ! -f "$CUSTOM_FILE" ]; then
+            echo "ERROR: File custom $CUSTOM_FILE tidak ada di repo!"
+            echo "Pastikan sudah commit custom-config/manager_list.h ke repo Kernel4TestOnly."
+            ls -la "$GITHUB_WORKSPACE/custom-config/" 2>/dev/null || echo "Folder custom-config/ tidak ada!"
+            exit 1
+          fi
+          
+          echo ""
+          echo "== Isi manager_list.h ASLI (SEBELUM di-override) =="
+          cat "$MANAGER_LIST"
+          
+          cp "$CUSTOM_FILE" "$MANAGER_LIST"
+          
+          echo ""
+          echo "== Isi manager_list.h SETELAH di-override =="
+          cat "$MANAGER_LIST"
+          
+          echo ""
+          echo "[OK] manager_list.h berhasil di-override dengan hash APK custom."
+          echo "[OK] Hash APK fork nubelf-dev sudah include: bdcbd4513f... (id.next.manager spoofed)"
 
       - name: Patch arch/arm64/Makefile (fix clang vdso32 "-EL" assembler error)
         run: |
