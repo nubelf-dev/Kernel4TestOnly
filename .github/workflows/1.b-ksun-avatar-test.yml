@@ -139,11 +139,6 @@ jobs:
 
       - name: Override manager_list.h with custom Manager APK hashes
         run: |
-          echo "=== SKIP override untuk test kernel bersih ==="
-          exit 0
-          
-          # === Kode di bawah ini di-skip untuk test ===
-          # === Untuk re-enable: hapus 2 baris di atas (echo + exit 0) ===
           cd kernel-src
           
           echo "== Cari file manager_list.h yang di-inject KernelSU-Next =="
