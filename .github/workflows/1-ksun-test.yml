@@ -1,0 +1,353 @@
+name: 1. Compile Kernel - BOS Beryllium + KSU-Next + Log
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_name:
+        description: 'Nama Build'
+        required: true
+        default: 'bos-beryllium-ksunext'
+      kernel_source:
+        description: 'Kernel Source'
+        required: true
+        default: 'https://github.com/baikalos/android_kernel_xiaomi_sdm845.git'
+      kernel_branch:
+        description: 'Kernel Branch'
+        required: true
+        default: '13.0'
+      defconfig:
+        description: 'defconfig path (di kernel source)'
+        required: true
+        default: 'vendor/xiaomi/mi845_defconfig'
+      use_extracted_config:
+        description: 'Pakai config hasil extract boot.img asli sebagai basis? (true/false)'
+        required: true
+        default: 'true'
+      ksu_tag:
+        description: 'KernelSU-Next tag/commit'
+        required: false
+        default: 'v3.3.0-enjoy'
+      clang_url:
+        description: 'Clang prebuilt'
+        required: false
+        default: 'https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz'
+
+jobs:
+  test-build:
+    name: ${{ github.event.inputs.zip_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo (untuk akses extracted-config/bos13_defconfig)
+        uses: actions/checkout@v4
+
+      - name: Show Input
+        run: |
+          echo "kernel_source: ${{ github.event.inputs.kernel_source }}"
+          echo "kernel_branch: ${{ github.event.inputs.kernel_branch }}"
+          echo "defconfig: ${{ github.event.inputs.defconfig }}"
+          echo "use_extracted_config: ${{ github.event.inputs.use_extracted_config }}"
+          echo "ksu_tag: ${{ github.event.inputs.ksu_tag }}"
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc build-essential flex bison ca-certificates clang lld llvm \
+            libssl-dev libelf-dev cpio curl git unzip wget \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            g++-aarch64-linux-gnu g++-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+            libncurses5-dev libncursesw5-dev
+          echo "== Cek lokasi arm-linux-gnueabi-as =="
+          which arm-linux-gnueabi-as || echo "TIDAK DITEMUKAN"
+
+      - name: Setup Clang Cache
+        id: clang-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/clang-ext
+          key: clang-${{ github.event.inputs.clang_url }}
+
+      - name: Setup Clang
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/clang-ext
+          curl -Lo clang.tar.gz "${{ github.event.inputs.clang_url }}"
+          tar -xzf clang.tar.gz -C ~/clang-ext
+          rm -f clang.tar.gz
+
+      - name: Add Clang to PATH
+        run: echo "$HOME/clang-ext/bin" >> $GITHUB_PATH
+
+      - name: Clone Kernel Source (BaikalOS)
+        run: |
+          git clone --depth=1 "${{ github.event.inputs.kernel_source }}" -b "${{ github.event.inputs.kernel_branch }}" kernel-src
+
+      - name: Setup KernelSU-Next (manual, non-GKI)
+        run: |
+          cd kernel-src
+          curl -LSs "https://raw.githubusercontent.com/ThRE-Team/KernelSU-Next/main/kernel/setup.sh" | bash -s "${{ github.event.inputs.ksu_tag }}"
+
+          # Cek apakah symlink & Kconfig/Makefile berhasil ter-inject
+          echo "== Cek symlink KSU =="
+          ls -la drivers/kernelsu || echo "TIDAK ADA symlink drivers/kernelsu!"
+          echo "== Cek entri Makefile =="
+          grep -n "kernelsu" drivers/Makefile || echo "TIDAK ADA entri di drivers/Makefile!"
+          echo "== Cek entri Kconfig =="
+          grep -n "kernelsu" drivers/Kconfig || echo "TIDAK ADA entri di drivers/Kconfig!"
+
+          DEFCONFIG_PATH="arch/arm64/configs/${{ github.event.inputs.defconfig }}"
+
+          if [ ! -f "$DEFCONFIG_PATH" ]; then
+            echo "ERROR: defconfig tidak ditemukan di $DEFCONFIG_PATH"
+            echo "Mencari kemungkinan path defconfig lain:"
+            find arch/arm64/configs -iname "*845*" -o -iname "*beryllium*" -o -iname "*xiaomi*" 2>/dev/null
+            exit 1
+          fi
+
+          # Jika diaktifkan, GANTI isi defconfig source dengan config yang diekstrak
+          # langsung dari boot.img resmi BaikalOS (extract-ikconfig). Ini menjamin base
+          # config 100% identik dengan yang sudah terbukti bisa boot di HP, termasuk
+          # semua flag CONFIG_MACH_XIAOMI_* dan opsi board-specific lain yang mungkin
+          # tidak otomatis terisi sama oleh proses 'make defconfig && make olddefconfig'
+          # dari defconfig mentah di source.
+          if [ "${{ github.event.inputs.use_extracted_config }}" = "true" ]; then
+            EXTRACTED_CFG="$GITHUB_WORKSPACE/extracted-config/bos13_defconfig"
+            if [ -f "$EXTRACTED_CFG" ]; then
+              echo "[INFO] Memakai config hasil extract boot.img asli sebagai basis (menimpa $DEFCONFIG_PATH)."
+              cp "$EXTRACTED_CFG" "$DEFCONFIG_PATH"
+            else
+              echo "[PERINGATAN] use_extracted_config=true tapi file $EXTRACTED_CFG tidak ditemukan di repo."
+              echo "Pastikan kamu sudah commit file extracted config ke path 'extracted-config/bos13_defconfig' di repo ini."
+              echo "Lanjut pakai defconfig asli dari source kernel sebagai fallback."
+            fi
+          fi
+
+          # Tambahkan config KSU (idempotent: defconfig kernel mengabaikan duplikat,
+          # baris terakhir untuk key yang sama akan dipakai oleh olddefconfig).
+          # Daftar ini mengikuti PERSIS dokumentasi resmi integrasi non-GKI KernelSU-Next
+          # (BUKAN dokumentasi KernelSU asli/tiann, yang punya CONFIG_HAVE_KPROBES tapi
+          # tidak punya CONFIG_KSU_KPROBE_HOOKS):
+          # https://kernelsu-next.github.io/webpage/pages/how-to-integrate-for-non-gki.html
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KPROBES=y"
+            echo "CONFIG_KPROBE_EVENTS=y"
+            echo "CONFIG_KSU_KPROBE_HOOKS=y"
+          } >> "$DEFCONFIG_PATH"
+          echo "Defconfig $DEFCONFIG_PATH berhasil dipatch dengan opsi KSU."
+
+      - name: Patch arch/arm64/Makefile (fix clang vdso32 "-EL" assembler error)
+        run: |
+          cd kernel-src
+          MAIN_MK="arch/arm64/Makefile"
+
+          if [ ! -f "$MAIN_MK" ]; then
+            echo "ERROR: $MAIN_MK tidak ditemukan!"
+            exit 1
+          fi
+
+          echo "== Cari blok CLANG_PREFIX32 / GCC_TOOLCHAIN32 di $MAIN_MK =="
+          grep -n "CLANG_PREFIX32\|GCC_TOOLCHAIN32\|CLANG_TARGET_ARM32\|CLANG_GCC32_TC" "$MAIN_MK" || echo "TIDAK DITEMUKAN sama sekali!"
+
+          cp "$MAIN_MK" "$MAIN_MK.orig"
+
+          # Fix resmi: arm64: vdso32: Fix '--prefix=' value for newer versions of clang
+          # https://github.com/ClangBuiltLinux/linux/issues/1099
+          # CLANG_PREFIX32 harus menyertakan nama prefix CROSS_COMPILE_ARM32, bukan cuma direktorinya.
+          # Pattern asli biasanya:
+          #   export CLANG_PREFIX32 := --prefix=$(GCC_TOOLCHAIN32_DIR)
+          # diubah jadi:
+          #   export CLANG_PREFIX32 := --prefix=$(GCC_TOOLCHAIN32_DIR)$(notdir $(CROSS_COMPILE_ARM32))
+          sed -i -E \
+            's@(CLANG_PREFIX32[[:space:]]*:=[[:space:]]*--prefix=\$\(GCC_TOOLCHAIN32_DIR\))[[:space:]]*$@\1$(notdir $(CROSS_COMPILE_ARM32))@' \
+            "$MAIN_MK"
+
+          if ! diff -q "$MAIN_MK" "$MAIN_MK.orig" > /dev/null; then
+            echo "[OK] Patch CLANG_PREFIX32 berhasil diterapkan."
+            echo "== Baris setelah patch =="
+            grep -n "CLANG_PREFIX32" "$MAIN_MK"
+          else
+            echo "[PERINGATAN] Pattern CLANG_PREFIX32 tidak match/tidak berubah."
+            echo "Menampilkan 15 baris di sekitar definisi CLANG_PREFIX32 untuk diperiksa manual:"
+            grep -n -B5 -A10 "CLANG_TARGET_ARM32\|CLANG_PREFIX32" "$MAIN_MK" || true
+          fi
+
+          rm -f "$MAIN_MK.orig"
+
+      - name: Skip DTB yang tidak relevan/rusak (QVR headset, interposer SDM670)
+        run: |
+          cd kernel-src
+          DTS_MK="arch/arm64/boot/dts/qcom/Makefile"
+
+          if [ ! -f "$DTS_MK" ]; then
+            echo "PERINGATAN: $DTS_MK tidak ditemukan, skip step ini."
+            exit 0
+          fi
+
+          # 4 dtb ini BUKAN untuk Poco F1/beryllium (QVR = Qualcomm VR reference headset,
+          # interposer-sdm670 = board test interposer), dan rusak (phandle reference hilang)
+          # di kernel source ini. Kita hapus dari daftar build supaya target `dtbs`
+          # (yang menjadi dependency Image.gz-dtb) bisa sukses sepenuhnya.
+          BROKEN_DTBS=(
+            "sdm845-v2-qvr-evt.dtb"
+            "sdm845-v2-qvr-dvt.dtb"
+            "sdm845-interposer-sdm670-mtp.dtb"
+            "sdm845-interposer-sdm670-cdp.dtb"
+          )
+
+          cp "$DTS_MK" "$DTS_MK.orig"
+
+          for dtb in "${BROKEN_DTBS[@]}"; do
+            if grep -q "$dtb" "$DTS_MK"; then
+              sed -i "/$dtb/d" "$DTS_MK"
+              echo "[OK] Baris untuk $dtb dihapus dari $DTS_MK."
+            else
+              echo "[INFO] $dtb tidak ditemukan di $DTS_MK (mungkin sudah tidak ada / nama beda)."
+            fi
+          done
+
+          echo "== Diff perubahan =="
+          diff "$DTS_MK.orig" "$DTS_MK" || true
+
+          rm -f "$DTS_MK.orig"
+
+      - name: Compile Kernel (test build, tidak untuk flash)
+        env:
+          KBUILD_BUILD_USER: "Nerf."
+          KBUILD_BUILD_HOST: "OldlineSSS"
+        run: |
+          cd kernel-src
+          OUT_DIR="out"
+          export PATH="$HOME/clang-ext/bin:$PATH"
+
+          MAKE_ARGS=(
+            O=$OUT_DIR
+            ARCH=arm64
+            CC=clang
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            READELF=llvm-readelf
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            LLVM=1
+            LLVM_IAS=1
+          )
+
+          mkdir -p $OUT_DIR
+          make "${MAKE_ARGS[@]}" ${{ github.event.inputs.defconfig }}
+          make "${MAKE_ARGS[@]}" olddefconfig
+
+          echo "== Cek config KSU di .config hasil olddefconfig =="
+          for cfg in CONFIG_KSU CONFIG_KPROBES CONFIG_KPROBE_EVENTS CONFIG_KSU_KPROBE_HOOKS; do
+            grep "^${cfg}=" $OUT_DIR/.config || echo "PERINGATAN: ${cfg} tidak aktif di .config final!"
+          done
+
+          # -k (keep going): jangan berhenti total kalau satu target dtb gagal
+          # (misal dtb reference board Qualcomm yang tidak relevan untuk beryllium, contoh: sdm845-v2-qvr-evt.dtb).
+          # Target akhir kita (Image, Image.gz-dtb untuk beryllium) tidak butuh dtb tersebut.
+          set +e
+          make -k -j$(nproc --all) "${MAKE_ARGS[@]}" 2>&1 | tee build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          set -e
+
+          echo "== Exit code make: $BUILD_EXIT =="
+          echo "== Cek apakah Image / Image.gz-dtb berhasil dihasilkan =="
+          IMAGE_OK=0
+          IMAGE_GZ_DTB_OK=0
+
+          if [ -f "$OUT_DIR/arch/arm64/boot/Image" ]; then
+            ls -la "$OUT_DIR/arch/arm64/boot/Image"
+            IMAGE_OK=1
+          else
+            echo "Image TIDAK ADA"
+          fi
+
+          if [ -f "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" ]; then
+            ls -la "$OUT_DIR/arch/arm64/boot/Image.gz-dtb"
+            IMAGE_GZ_DTB_OK=1
+          else
+            echo "Image.gz-dtb TIDAK ADA"
+          fi
+
+          if [ "$IMAGE_GZ_DTB_OK" -eq 1 ]; then
+            echo "[OK] Image.gz-dtb berhasil dihasilkan lengkap (kernel + dtb beryllium). Ini yang dipakai untuk flash."
+            BUILD_OK=1
+          elif [ "$IMAGE_OK" -eq 1 ]; then
+            echo "[SEBAGIAN OK] Image (vmlinux mentah) berhasil, tapi Image.gz-dtb belum ada."
+            echo "Kemungkinan target dtbs masih gagal di tempat lain, atau urutan build target dtb device beryllium belum sesuai."
+            BUILD_OK=1
+          else
+            echo "[GAGAL] Baik Image maupun Image.gz-dtb tidak ditemukan. Build benar-benar gagal."
+            BUILD_OK=0
+          fi
+
+          echo "BUILD_OK=$BUILD_OK" >> "$GITHUB_ENV"
+          if [ "$BUILD_OK" -ne 1 ]; then
+            exit 1
+          fi
+
+      - name: Capture Build Metadata (untuk changelog otomatis)
+        if: env.BUILD_OK == '1'
+        run: |
+          cd kernel-src
+          KERNEL_COMMIT=$(git rev-parse --short HEAD)
+          KERNEL_COMMIT_FULL=$(git rev-parse HEAD)
+          KSU_COMMIT=$(cd KernelSU-Next && git rev-parse --short HEAD)
+          KERNEL_VERSION_STRING=$(cat out/include/config/kernel.release 2>/dev/null || echo unknown)
+          BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M UTC')
+
+          cat > ../build-metadata.json << JSONEOF
+          {
+            "build_date": "${BUILD_DATE}",
+            "kernel_source": "${{ github.event.inputs.kernel_source }}",
+            "kernel_branch": "${{ github.event.inputs.kernel_branch }}",
+            "kernel_commit": "${KERNEL_COMMIT}",
+            "kernel_commit_full": "${KERNEL_COMMIT_FULL}",
+            "ksu_tag": "${{ github.event.inputs.ksu_tag }}",
+            "ksu_commit": "${KSU_COMMIT}",
+            "kernel_version_string": "${KERNEL_VERSION_STRING}",
+            "defconfig": "${{ github.event.inputs.defconfig }}",
+            "use_extracted_config": "${{ github.event.inputs.use_extracted_config }}",
+            "clang_url": "${{ github.event.inputs.clang_url }}",
+            "zip_name": "${{ github.event.inputs.zip_name }}"
+          }
+          JSONEOF
+
+          echo "== Isi build-metadata.json =="
+          cat ../build-metadata.json
+
+      - name: Upload Build Metadata
+        if: env.BUILD_OK == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metadata
+          path: build-metadata.json
+          if-no-files-found: warn
+
+      - name: Upload Build Log (selalu, untuk debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: kernel-src/build.log
+          if-no-files-found: warn
+
+      - name: Upload Image.gz-dtb
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.zip_name }}-gz-dtb
+          path: kernel-src/out/arch/arm64/boot/Image.gz-dtb
+          if-no-files-found: ignore
+
+      - name: Upload Image Only
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.zip_name }}-raw
+          path: kernel-src/out/arch/arm64/boot/Image
+          if-no-files-found: ignore
