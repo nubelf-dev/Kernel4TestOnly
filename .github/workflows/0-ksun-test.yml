@@ -1,4 +1,4 @@
-name: 1. Compile Kernel - BOS Beryllium + KSU-Next + Log
+name: 0. Compile Kernel - BOS Beryllium + KSU-Next + Log
 
 on:
   workflow_dispatch:
@@ -124,24 +124,22 @@ jobs:
           fi
 
           # Tambahkan config KSU (idempotent: defconfig kernel mengabaikan duplikat,
+          # Tambahkan config KSU (idempotent: defconfig kernel mengabaikan duplikat,
           # baris terakhir untuk key yang sama akan dipakai oleh olddefconfig).
-          # Daftar ini mengikuti PERSIS dokumentasi resmi integrasi non-GKI KernelSU-Next
-          # (BUKAN dokumentasi KernelSU asli/tiann, yang punya CONFIG_HAVE_KPROBES tapi
-          # tidak punya CONFIG_KSU_KPROBE_HOOKS):
+          #
+          # Config KSU-Next sesuai Kconfig ThRE-Team KSU-Next v3.3.0-enjoy:
+          # https://github.com/ThRE-Team/KernelSU-Next/blob/v3.3.0-enjoy/kernel/Kconfig
+          #
+          # PENTING: Dokumentasi resmi KSU-Next Non-GKI menyebut "CONFIG_KSU_KPROBE_HOOKS"
+          # (typo). Nama sebenarnya di Kconfig adalah "CONFIG_KSU_KPROBES_HOOK".
+          # Referensi dokumentasi (untuk konteks, meski nama config-nya typo):
           # https://kernelsu-next.github.io/webpage/pages/how-to-integrate-for-non-gki.html
           {
-          # Before
-          # echo "CONFIG_KSU=y"
-          # echo "CONFIG_KPROBES=y"
-          # echo "CONFIG_KPROBE_EVENTS=y"           # nama beda di 4.9 → di-drop tapi ga masalah
-          # echo "CONFIG_KSU_KPROBE_HOOKS=y"        # nama salah → di-drop tapi default y
-          # After
-          # Nama config BENAR sesuai Kconfig ThRE-Team KSU-Next v3.3.0-enjoy:
             echo "CONFIG_KSU=y"
-            echo "CONFIG_KSU_KPROBES_HOOK=y"
-            echo "CONFIG_KPROBES=y"
-            echo "CONFIG_KRETPROBES=y"
-            echo "CONFIG_HAVE_SYSCALL_TRACEPOINTS=y"
+            echo "CONFIG_KSU_KPROBES_HOOK=y"          # KernelSU tracepoint+kretprobe hook
+            echo "CONFIG_KPROBES=y"                   # dependency
+            echo "CONFIG_KRETPROBES=y"                # dependency
+            echo "CONFIG_HAVE_SYSCALL_TRACEPOINTS=y"  # dependency
           } >> "$DEFCONFIG_PATH"
           echo "Defconfig $DEFCONFIG_PATH berhasil dipatch dengan opsi KSU."
 
@@ -252,8 +250,13 @@ jobs:
           make "${MAKE_ARGS[@]}" olddefconfig
 
           echo "== Cek config KSU di .config hasil olddefconfig =="
-          for cfg in CONFIG_KSU CONFIG_KPROBES CONFIG_KPROBE_EVENTS CONFIG_KSU_KPROBE_HOOKS; do
-            grep "^${cfg}=" $OUT_DIR/.config || echo "PERINGATAN: ${cfg} tidak aktif di .config final!"
+          # Nama config BENAR (sama dengan yang di-inject di step Setup):
+          for cfg in CONFIG_KSU CONFIG_KSU_KPROBES_HOOK CONFIG_KPROBES CONFIG_KRETPROBES CONFIG_HAVE_SYSCALL_TRACEPOINTS; do
+            if grep -q "^${cfg}=y" $OUT_DIR/.config; then
+              echo "[OK] ${cfg}=y"
+            else
+              echo "[MISSING] ${cfg} - kernel mungkin tidak sepenuhnya berfungsi!"
+            fi
           done
 
           # -k (keep going): jangan berhenti total kalau satu target dtb gagal
