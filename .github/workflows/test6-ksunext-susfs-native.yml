@@ -24,9 +24,13 @@ on:
         required: true
         default: 'true'
       ksu_tag:
-        description: 'KSU-Next tag (v3.3.0-enjoy = with SUSFS built-in)'
+        description: 'KSU-Next tag (v3.3.0-enjoy = SUSFS support)'
         required: false
         default: 'v3.3.0-enjoy'
+      susfs_patch_url:
+        description: 'SUSFS v2.2.0 patch (JackA1ltman)'
+        required: true
+        default: 'https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.9.patch'
       clang_url:
         description: 'Clang prebuilt'
         required: false
@@ -49,9 +53,7 @@ jobs:
           echo "========================================"
           echo "  BOS + KSU-Next + SUSFS v2.2.0 (Final)"
           echo "========================================"
-          echo "kernel_source: ${{ github.event.inputs.kernel_source }}"
-          echo "kernel_branch: ${{ github.event.inputs.kernel_branch }}"
-          echo "defconfig: ${{ github.event.inputs.defconfig }}"
+          echo "kernel : ${{ github.event.inputs.kernel_source }} @ ${{ github.event.inputs.kernel_branch }}"
           echo "ksu_tag: ${{ github.event.inputs.ksu_tag }}"
 
       - name: Install Build Dependencies
@@ -89,21 +91,15 @@ jobs:
             -b "${{ github.event.inputs.kernel_branch }}" kernel-src
 
       # ============================================================
-      # KSU-Next + SUSFS: tag v3.3.0-enjoy SUDAH include SUSFS v2.2.0
-      # Tidak perlu clone susfs4ksu, patch JackA1ltman, atau fix manual
-      # Setup.sh handle semuanya!
+      # STEP 1: Setup KSU-Next (tag enjoy = Kconfig SUSFS built-in)
+      # File SUSFS source TIDAK included — harus copy sendiri
       # ============================================================
-      - name: Setup KernelSU-Next + SUSFS (v3.3.0-enjoy built-in)
+      - name: Setup KernelSU-Next (tag enjoy = SUSFS Kconfig built-in)
         run: |
           cd kernel-src
           curl -LSs "https://raw.githubusercontent.com/ThRE-Team/KernelSU-Next/main/kernel/setup.sh" \
             | bash -s "${{ github.event.inputs.ksu_tag }}"
 
-          echo "== Verify KSU-Next =="
-          ls -la drivers/kernelsu || echo "MISSING!"
-          grep -n "kernelsu" drivers/Makefile | head -3
-
-          # Detect KSU folder
           KSU_DIR=""
           for d in KernelSU-Next KernelSU; do
             [ -d "$d" ] && { KSU_DIR="$d"; break; }
@@ -112,22 +108,216 @@ jobs:
           echo "KSU folder: $KSU_DIR"
 
           echo ""
-          echo "== Verify SUSFS built-in =="
-          if [ -n "$KSU_DIR" ]; then
-            grep "KSU_SUSFS" "$KSU_DIR/kernel/Kconfig" | head -5 || echo "[WARN] SUSFS not in Kconfig"
+          echo "== Verify Kconfig SUSFS =="
+          grep "KSU_SUSFS" "$KSU_DIR/kernel/Kconfig" | head -5 || echo "[INFO] SUSFS not in Kconfig yet"
+
+      # ============================================================
+      # STEP 2: Copy SUSFS v2.2.0 source files (patch JackA1ltman)
+      # Tag enjoy punya Kconfig + driver code yang expect SUSFS,
+      # tapi file source (susfs.h, susfs.c, dll) harus di-provide
+      # ============================================================
+      - name: Apply SUSFS v2.2.0 (patch JackA1ltman)
+        run: |
+          cd kernel-src
+
+          echo "== Download patch =="
+          curl -LSsf "${{ github.event.inputs.susfs_patch_url }}" -o /tmp/susfs.patch
+          echo "Size: $(wc -c < /tmp/susfs.patch) bytes"
+
+          echo ""
+          echo "== Apply patch =="
+          set +e
+          patch -p1 --fuzz=3 --no-backup-if-mismatch --force < /tmp/susfs.patch 2>&1 | tee /tmp/patch_susfs.log
+          set -e
+
+          echo ""
+          echo "Succeed: $(grep -c 'succeeded' /tmp/patch_susfs.log)"
+          echo "FAILED : $(grep -c 'FAILED' /tmp/patch_susfs.log)"
+
+          find . -name "*.rej" -delete 2>/dev/null || true
+          find . -name "*.orig" -delete 2>/dev/null || true
+
+          # sus_su.c tidak ada di patch JackA1ltman, copy dari simonpunk
+          if [ ! -f fs/sus_su.c ]; then
+            echo ""
+            echo "== Copy sus_su.c dari simonpunk =="
+            git clone --depth=1 -b kernel-4.9 \
+              https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
+            if [ -f /tmp/susfs4ksu/kernel_patches/fs/sus_su.c ]; then
+              cp /tmp/susfs4ksu/kernel_patches/fs/sus_su.c fs/sus_su.c
+              echo "[OK] sus_su.c copied"
+            fi
+            if [ -f /tmp/susfs4ksu/kernel_patches/include/linux/sus_su.h ] && [ ! -f include/linux/sus_su.h ]; then
+              cp /tmp/susfs4ksu/kernel_patches/include/linux/sus_su.h include/linux/sus_su.h
+              echo "[OK] sus_su.h copied"
+            fi
+            rm -rf /tmp/susfs4ksu
+          fi
+
+          echo ""
+          echo "== Verify SUSFS v2.2.0 =="
+          grep "SUSFS_VERSION" include/linux/susfs.h | head -3
+          ls -la fs/susfs.c fs/sus_su.c include/linux/susfs.h include/linux/susfs_def.h 2>/dev/null || true
+
+      # ============================================================
+      # STEP 3: Manual fix SUSFS hunks yang gagal (proven ReSukiSU)
+      # ============================================================
+      - name: Manual fix SUSFS hunks
+        run: |
+          cd kernel-src
+
+          # Fix proc_namespace.c include
+          if [ -f fs/proc_namespace.c ] && ! grep -q "susfs_def.h" fs/proc_namespace.c; then
+            sed -i '/#include "proc\/internal.h"/a\
+          #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
+          #include <linux/susfs_def.h>\
+          #endif' fs/proc_namespace.c
+          fi
+
+          # Fix stat.c getattr wrap
+          if [ -f fs/stat.c ] && ! grep -q "int err = inode->i_op->getattr" fs/stat.c; then
+            python3 << 'PYEOF'
+          import re
+          from pathlib import Path
+          p = Path("fs/stat.c")
+          text = p.read_text()
+          pattern = re.compile(
+              r'(\tif\s*\(inode->i_op->getattr\)\s*\n)'
+              r'(\t\treturn inode->i_op->getattr\(path->mnt,\s*path->dentry,\s*stat\);)',
+              re.MULTILINE
+          )
+          replacement = (r'\1'
+              '#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n\t{\n'
+              '\t\tint err = inode->i_op->getattr(path->mnt, path->dentry, stat);\n'
+              '\t\tif (!err)\n'
+              '\t\t\tsusfs_sus_kstat_spoof_generic_fillattr(inode, stat);\n'
+              '\t\treturn err;\n\t}\n#else\n' r'\2' '\n#endif')
+          new_text, n = pattern.subn(replacement, text)
+          if n > 0: p.write_text(new_text)
+          PYEOF
+          fi
+
+          # Fix force include susfs.h
+          python3 << 'PYEOF'
+          from pathlib import Path
+          for filepath in ["fs/open.c", "fs/stat.c", "fs/proc_namespace.c", "fs/proc/task_mmu.c", "fs/proc/cmdline.c"]:
+              p = Path(filepath)
+              if not p.exists(): continue
+              lines = p.read_text().split('\n')
+              has_susfs = any('linux/susfs.h' in l for l in lines)
+              has_susfs_def = any('linux/susfs_def.h' in l for l in lines)
+              if has_susfs and has_susfs_def: continue
+              insert_idx = -1
+              for i, line in enumerate(lines):
+                  if line.strip().startswith('#include'):
+                      insert_idx = i; break
+              if insert_idx == -1: continue
+              new_includes = []
+              if not has_susfs: new_includes.append('#include <linux/susfs.h>')
+              if not has_susfs_def: new_includes.append('#include <linux/susfs_def.h>')
+              lines[insert_idx:insert_idx] = new_includes
+              p.write_text('\n'.join(lines))
+          PYEOF
+
+          # Fix proc_namespace.c extern declarations
+          if [ -f fs/proc_namespace.c ] && ! grep -q "extern bool susfs_is_current_ksu_domain" fs/proc_namespace.c; then
+            python3 << 'PYEOF'
+          from pathlib import Path
+          p = Path("fs/proc_namespace.c")
+          lines = p.read_text().split('\n')
+          new_lines = []
+          inserted = False
+          for line in lines:
+              new_lines.append(line)
+              if not inserted and '#include "internal.h"' in line:
+                  new_lines.extend(['', '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT',
+                      'extern bool susfs_is_current_ksu_domain(void);',
+                      'extern bool susfs_hide_sus_mnts_for_non_su_procs;',
+                      '#endif', ''])
+                  inserted = True
+          p.write_text('\n'.join(new_lines))
+          PYEOF
+          fi
+
+          # Fix stat.c forward declaration
+          if [ -f fs/stat.c ] && ! grep -q "extern void susfs_sus_kstat_spoof_generic_fillattr" fs/stat.c; then
+            python3 << 'PYEOF'
+          from pathlib import Path
+          p = Path("fs/stat.c")
+          lines = p.read_text().split('\n')
+          last_include = -1
+          for i, line in enumerate(lines):
+              if line.strip().startswith('#include'): last_include = i
+          if last_include >= 0:
+              lines[last_include+1:last_include+1] = ['', '#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT',
+                  'extern void susfs_sus_kstat_spoof_generic_fillattr(struct inode *inode, struct kstat *stat);',
+                  '#endif', '']
+              p.write_text('\n'.join(lines))
+          PYEOF
+          fi
+
+          # Fix stat.c stray call
+          if [ -f fs/stat.c ] && grep -q "^EXPORT_SYMBOL(vfs_getattr_nosec);$" fs/stat.c; then
+            python3 << 'PYEOF'
+          from pathlib import Path
+          p = Path("fs/stat.c")
+          lines = p.read_text().split('\n')
+          new_lines = []
+          i = 0
+          removed = False
+          while i < len(lines):
+              line = lines[i]
+              new_lines.append(line)
+              if (not removed and line.strip() == 'EXPORT_SYMBOL(vfs_getattr_nosec);' and i + 3 < len(lines)):
+                  if (lines[i+1].strip() == '#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT'
+                      and 'susfs_sus_kstat_spoof_generic_fillattr' in lines[i+2].strip()
+                      and lines[i+3].strip() == '#endif'):
+                      i += 4; removed = True; continue
+              i += 1
+          if removed: p.write_text('\n'.join(new_lines))
+          PYEOF
           fi
 
       # ============================================================
-      # Manual hooks: WAJIB untuk SUSFS di kernel 4.9 non-GKI
-      # ThRE-Team confirm: Mode hook = Manual (bukan Kprobes)
+      # STEP 4: Fix selinux_hide.c (kprobe functions not available)
+      # ============================================================
+      - name: Fix selinux_hide.c (disable unavailable kprobe calls)
+        env:
+          KSU_DIR: ${{ env.KSU_DIR }}
+        run: |
+          cd kernel-src
+          HIDE_C="${KSU_DIR}/kernel/feature/selinux_hide.c"
+
+          if [ -f "$HIDE_C" ] && grep -q "init_kprobe" "$HIDE_C"; then
+            echo "== Disable kprobe calls di selinux_hide.c =="
+            python3 - "$HIDE_C" << 'PYEOF'
+          import sys, re
+          from pathlib import Path
+          p = Path(sys.argv[1])
+          if not p.exists(): exit(0)
+          text = p.read_text()
+
+          # Comment out all init_kprobe and destroy_kprobe calls
+          text = re.sub(r'^(\s*)(slow_avc_audit_kp\s*=\s*init_kprobe\(.+\);)', r'\1// \2', text, flags=re.MULTILINE)
+          text = re.sub(r'^(\s*)(destroy_kprobe\(.+\);)', r'\1// \2', text, flags=re.MULTILINE)
+
+          # Juga comment out deklarasi slow_avc_audit_kp kalau ada
+          text = re.sub(r'^(\s*)(static\s+struct\s+kprobe\s+\*slow_avc_audit_kp)', r'\1// \2', text, flags=re.MULTILINE)
+
+          p.write_text(text)
+          print("[OK] selinux_hide.c: kprobe calls disabled")
+          PYEOF
+          fi
+
+      # ============================================================
+      # STEP 5: Extract hook signatures dari KSU-Next source
       # ============================================================
       - name: Extract hook signatures dari KSU-Next
         run: |
           cd kernel-src
-          KSU_DIR="${{ env.KSU_DIR }}"
 
           python3 << 'PYEOF'
-          import re, os
+          import re
           from pathlib import Path
           ksu_dirs = ['KernelSU-Next', 'KernelSU']
           ksu_dir = next((d for d in ksu_dirs if Path(d).exists()), None)
@@ -163,6 +353,9 @@ jobs:
           print("\n[OK] ksu_hook.h generated")
           PYEOF
 
+      # ============================================================
+      # STEP 6: Inject 7 manual hooks (proven dari ReSukiSU v6)
+      # ============================================================
       - name: Inject 7 manual hooks
         run: |
           cd kernel-src
@@ -193,8 +386,6 @@ jobs:
           if ! grep -q "ksu_handle_execveat" fs/exec.c; then
             inject_hook fs/exec.c "static int do_execveat_common" \
               "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"
-            [ $? -ne 0 ] && inject_hook fs/exec.c "int do_execveat_common" \
-              "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"
           fi
 
           # 2. faccessat
@@ -211,7 +402,7 @@ jobs:
               "ksu_handle_stat(&dfd, &filename, &flag);"
           fi
 
-          # 4. sys_read (KSU-Next: 1 arg only)
+          # 4. sys_read (KSU-Next: 1 arg)
           add_include fs/read_write.c
           if ! grep -q "ksu_handle_sys_read" fs/read_write.c; then
             inject_hook fs/read_write.c "SYSCALL_DEFINE3.read" \
@@ -225,7 +416,7 @@ jobs:
               "ksu_handle_setresuid(ruid, euid, suid);"
           fi
 
-          # 6. sys_reboot (by value + pointer)
+          # 6. sys_reboot
           add_include kernel/reboot.c
           if [ -f kernel/reboot.c ] && ! grep -q "ksu_handle_sys_reboot" kernel/reboot.c; then
             inject_hook kernel/reboot.c "SYSCALL_DEFINE4.reboot" \
@@ -250,13 +441,16 @@ jobs:
             echo "  $f -> ${HOOKS:-NONE}"
           done
 
+      # ============================================================
+      # STEP 7: Prepare defconfig
+      # ============================================================
       - name: Prepare defconfig
         run: |
           cd kernel-src
           DEFCONFIG_PATH="arch/arm64/configs/${{ github.event.inputs.defconfig }}"
 
           if [ ! -f "$DEFCONFIG_PATH" ]; then
-            echo "ERROR: defconfig tidak ditemukan"
+            echo "ERROR: defconfig not found"
             exit 1
           fi
 
@@ -264,7 +458,7 @@ jobs:
             for cfg in "$GITHUB_WORKSPACE/extracted-config/my_defconfig.txt" \
                        "$GITHUB_WORKSPACE/extracted-config/bos13_defconfig"; do
               if [ -f "$cfg" ]; then
-                echo "[INFO] Pakai extracted config: $cfg"
+                echo "[INFO] Pakai: $cfg"
                 cp "$cfg" "$DEFCONFIG_PATH"
                 break
               fi
@@ -276,11 +470,11 @@ jobs:
 
           {
             echo ""
-            echo "# === KernelSU-Next + SUSFS v2.2.0 (enjoy) ==="
+            echo "# === KernelSU-Next + SUSFS v2.2.0 ==="
             echo "CONFIG_KSU=y"
             echo "CONFIG_KPROBES=y"
             echo ""
-            echo "# === SUSFS (built-in dari tag v3.3.0-enjoy) ==="
+            echo "# === SUSFS (tag enjoy built-in Kconfig) ==="
             echo "CONFIG_KSU_SUSFS=y"
             echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
@@ -305,9 +499,7 @@ jobs:
       - name: Patch arch/arm64/Makefile (fix clang vdso32)
         run: |
           cd kernel-src
-          MAIN_MK="arch/arm64/Makefile"
-          [ -f "$MAIN_MK" ] || exit 1
-          sed -i -E 's@(CLANG_PREFIX32[[:space:]]*:=[[:space:]]*--prefix=\$\(GCC_TOOLCHAIN32_DIR\))[[:space:]]*$@\1$(notdir $(CROSS_COMPILE_ARM32))@' "$MAIN_MK" 2>/dev/null || true
+          sed -i -E 's@(CLANG_PREFIX32[[:space:]]*:=[[:space:]]*--prefix=\$\(GCC_TOOLCHAIN32_DIR\))[[:space:]]*$@\1$(notdir $(CROSS_COMPILE_ARM32))@' arch/arm64/Makefile 2>/dev/null || true
 
       - name: Skip broken DTBs
         run: |
@@ -318,6 +510,9 @@ jobs:
             sed -i "/$dtb/d" "$DTS_MK" 2>/dev/null || true
           done
 
+      # ============================================================
+      # STEP 8: Compile
+      # ============================================================
       - name: Compile Kernel
         run: |
           cd kernel-src
@@ -347,7 +542,7 @@ jobs:
           make "${MAKE_ARGS[@]}" olddefconfig
 
           echo "== Config final =="
-          for cfg in CONFIG_KSU CONFIG_KPROBES CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_TRY_UMOUNT; do
+          for cfg in CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_TRY_UMOUNT CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KPROBES; do
             grep "^${cfg}=" $OUT_DIR/.config || echo "WARN: ${cfg} NOT SET"
           done
 
@@ -369,14 +564,13 @@ jobs:
           echo "BUILD_OK=$BUILD_OK" >> "$GITHUB_ENV"
           [ "$BUILD_OK" -eq 1 ] || exit 1
 
-      - name: Capture Build Metadata
+      - name: Capture metadata
         if: env.BUILD_OK == '1'
         run: |
           cd kernel-src
           KSU_DIR="${{ env.KSU_DIR }}"
           KSU_COMMIT=$([ -d "$KSU_DIR" ] && cd "$KSU_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-          SUSFS_VER=$(grep "SUSFS_VERSION" include/linux/susfs.h 2>/dev/null | grep -oE '"[^"]+"' | tr -d '"' || echo "built-in")
-          
+          SUSFS_VER=$(grep "SUSFS_VERSION" include/linux/susfs.h 2>/dev/null | grep -oE '"[^"]+"' | tr -d '"' || echo "unknown")
           cat > ../build-metadata.json << JSONEOF
           {
             "build_date": "$(date -u '+%Y-%m-%d %H:%M UTC')",
@@ -394,14 +588,14 @@ jobs:
           JSONEOF
           cat ../build-metadata.json | jq .
 
-      - name: Upload Build Metadata
+      - name: Upload metadata
         if: env.BUILD_OK == '1'
         uses: actions/upload-artifact@v4
         with:
           name: build-metadata
           path: build-metadata.json
 
-      - name: Upload Build Log
+      - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
