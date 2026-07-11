@@ -131,6 +131,8 @@ jobs:
           # https://kernelsu-next.github.io/webpage/pages/how-to-integrate-for-non-gki.html
           {
             echo "CONFIG_KSU=y"
+            echo "CONFIG_KPROBES=y"
+            echo "CONFIG_KPROBE_EVENTS=y"
             echo "CONFIG_KSU_KPROBES_HOOK=y"
             echo "CONFIG_KSU_SUSFS=y"
             echo "CONFIG_KSU_SUSFS_SUS_PATH=n"
