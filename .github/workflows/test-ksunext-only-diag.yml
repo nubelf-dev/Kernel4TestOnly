@@ -1,4 +1,4 @@
-name: TEST5. Compile Kernel - BOS Beryllium + KSU-Next v3.3.0-enjoy (Diagnostik, tanpa SUSFS)
+name: TEST Compile Kernel - BOS Beryllium + KSU-Next v3.3.0-enjoy (Diagnostik, tanpa SUSFS)
 
 on:
   workflow_dispatch:
