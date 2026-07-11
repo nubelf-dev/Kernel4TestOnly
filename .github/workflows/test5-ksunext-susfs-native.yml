@@ -159,8 +159,8 @@ jobs:
 
       - name: Compile Kernel
         env:
-          KBUILD_BUILD_USER: "tan"
-          KBUILD_BUILD_HOST: "ardiansyah"
+          KBUILD_BUILD_USER: "Nerf."
+          KBUILD_BUILD_HOST: "OldlineSSS"
         run: |
           cd kernel-src
           OUT_DIR="out"
