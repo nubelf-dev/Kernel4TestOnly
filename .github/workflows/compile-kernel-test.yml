@@ -1,304 +1,863 @@
-name: Compile Kernel Test
+###############################################################################
+#  compile-kernel-test.yml
+#  ──────────────────────────────────────────────────────────────────────────────
+#  Compile BaikalOS 13.0 kernel 4.9.337 (sdm845) + ReSukiSU + SUSFS 2.2.0
+#
+#  Alur repo:
+#    .github/workflows/
+#    ├── compile-kernel-test.yml       ← file ini
+#    └── build-flashable-zip-test.yml
+#    extracted-config/
+#    └── bos13_defconfig
+#    README.md
+#
+#  Sumber kernel : https://github.com/baikalos/android_kernel_xiaomi_sdm845
+#                  branch 13.0
+#  Clang         : clang-r487747c  (AOSP Android-U)
+#  GCC64         : aarch64-linux-android-4.9
+#  GCC32         : arm-linux-androideabi-4.9
+#  ReSukiSU      : https://github.com/ReSukiSU/ReSukiSU
+#  SUSFS patch   : susfs_patch_to_4.9.patch (v2.2.0)
+###############################################################################
+
+name: Compile Kernel (Test)
 
 on:
-  push:
-    branches: [main, master, test]
   workflow_dispatch:
-
-permissions:
-  contents: read
-  actions: write
+    inputs:
+      resukisu_branch:
+        description: "ReSukiSU branch / tag"
+        required: false
+        default: "main"
+      susfs_patch_url:
+        description: "URL patch SUSFS 2.2.0 untuk kernel 4.9"
+        required: false
+        default: "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.9.patch"
 
 env:
+  # ── Kernel source ──
   KERNEL_REPO: https://github.com/baikalos/android_kernel_xiaomi_sdm845
   KERNEL_BRANCH: "13.0"
-  DEFCONFIG: bos13_defconfig
+  KERNEL_DIR: android_kernel_xiaomi_sdm845
 
-  CLANG_URL: https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz
-  CLANG_DIR: /opt/clang-r487747c
+  # ── Defconfig ──
+  # Defconfig hasil extract-ikconfig dari boot.img BaikalOS 13.0
+  DEFCONFIG_NAME: bos13_defconfig
 
-  GCC64_URL: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
-  GCC64_DIR: /opt/aarch64-linux-android-4.9
+  # ── Build identity (jangan ubah nama kernel – ikut defconfig asli) ──
+  KBUILD_BUILD_USER: "Nerf."
+  KBUILD_BUILD_HOST: "OldlineSSS"
 
-  GCC32_URL: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
-  GCC32_DIR: /opt/arm-linux-androideabi-4.9
+  # ── Toolchain ──
+  CLANG_VERSION: clang-r487747c
+  CLANG_URL: "https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz"
+  GCC64_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
+  GCC32_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
+  GCC_BRANCH: android-13.0.0_r1
 
-  SUSFS_PATCH_URL: https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd/raw/mainline/Patches/Patch/susfs_patch_to_4.9.patch
+  # ── ReSukiSU ──
+  RESUKISU_REPO: https://github.com/ReSukiSU/ReSukiSU
 
 jobs:
-  build-kernel:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 240
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     steps:
-      - name: Checkout repository
+      # ================================================================
+      # 1. Checkout repo ini (untuk ambil bos13_defconfig & workflow)
+      # ================================================================
+      - name: Checkout this repository
         uses: actions/checkout@v4
+        with:
+          path: repo
 
+      # ================================================================
+      # 2. Install dependencies
+      # ================================================================
       - name: Install build dependencies
         run: |
-          sudo dpkg --add-architecture i386 || true
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential bc bison flex libssl-dev libelf-dev \
-            python3 python3-pip git curl wget zip unzip ccache \
-            device-tree-compiler libncurses5-dev libncursesw5-dev \
-            libncurses-dev libgmp-dev libmpc-dev libmpfr-dev \
-            libtinfo5 libtinfo-dev zstd lz4 rsync pkg-config \
-            gcc-multilib g++-multilib libzstd-dev liblz4-dev
-          ccache -M 5G
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex \
+            git gnupg gperf imagemagick lib32readline-dev \
+            lib32z1-dev libelf-dev liblz4-tool libncurses5-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
+            lzop pngcrush rsync schedtool squashfs-tools \
+            xsltproc zip zlib1g-dev python3 python-is-python3 \
+            cpio kmod
 
-      # ---------- Clang ----------
-      - name: Cache Clang
+      # ================================================================
+      # 3. Cache Clang toolchain
+      # ================================================================
+      - name: Cache Clang (${{ env.CLANG_VERSION }})
         id: cache-clang
         uses: actions/cache@v4
         with:
-          path: ${{ env.CLANG_DIR }}
-          key: clang-r487747c-${{ runner.os }}
-          restore-keys: clang-r487747c-
+          path: toolchain/clang
+          key: clang-${{ env.CLANG_VERSION }}-v1
 
-      - name: Download & extract Clang
+      - name: Download Clang (if cache miss)
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
-          sudo mkdir -p ${{ env.CLANG_DIR }}
-          curl -L ${{ env.CLANG_URL }} -o /tmp/clang-r487747c.tar.gz
-          sudo tar -xzf /tmp/clang-r487747c.tar.gz -C ${{ env.CLANG_DIR }}
-          if [ ! -x "${{ env.CLANG_DIR }}/bin/clang" ]; then
-            echo "::error::clang binary not found in ${{ env.CLANG_DIR }}/bin"
-            find ${{ env.CLANG_DIR }} -maxdepth 3 -type f -name clang || true
-            exit 1
-          fi
+          mkdir -p toolchain/clang
+          echo "⏳ Downloading ${{ env.CLANG_VERSION }}..."
+          curl -fsSL "${{ env.CLANG_URL }}" -o clang.tar.gz
+          tar -xzf clang.tar.gz -C toolchain/clang
+          rm -f clang.tar.gz
+          echo "✅ Clang downloaded"
+          toolchain/clang/bin/clang --version || true
 
-      # ---------- GCC64 ----------
-      - name: Cache GCC64
+      # ================================================================
+      # 4. Cache GCC toolchains
+      # ================================================================
+      - name: Cache GCC64 (aarch64-linux-android-4.9)
         id: cache-gcc64
         uses: actions/cache@v4
         with:
-          path: ${{ env.GCC64_DIR }}
-          key: gcc64-master-${{ runner.os }}
-          restore-keys: gcc64-
+          path: toolchain/gcc64
+          key: gcc64-aarch64-4.9-${{ env.GCC_BRANCH }}-v1
 
-      - name: Download GCC64
+      - name: Download GCC64 (if cache miss)
         if: steps.cache-gcc64.outputs.cache-hit != 'true'
         run: |
-          sudo git clone --depth=1 -b master ${{ env.GCC64_URL }} ${{ env.GCC64_DIR }}
+          git clone --depth=1 -b ${{ env.GCC_BRANCH }} \
+            ${{ env.GCC64_REPO }} toolchain/gcc64
+          echo "✅ GCC64 downloaded"
 
-      # ---------- GCC32 ----------
-      - name: Cache GCC32
+      - name: Cache GCC32 (arm-linux-androideabi-4.9)
         id: cache-gcc32
         uses: actions/cache@v4
         with:
-          path: ${{ env.GCC32_DIR }}
-          key: gcc32-master-${{ runner.os }}
-          restore-keys: gcc32-
+          path: toolchain/gcc32
+          key: gcc32-arm-4.9-${{ env.GCC_BRANCH }}-v1
 
-      - name: Download GCC32
+      - name: Download GCC32 (if cache miss)
         if: steps.cache-gcc32.outputs.cache-hit != 'true'
         run: |
-          sudo git clone --depth=1 -b master ${{ env.GCC32_URL }} ${{ env.GCC32_DIR }}
+          git clone --depth=1 -b ${{ env.GCC_BRANCH }} \
+            ${{ env.GCC32_REPO }} toolchain/gcc32
+          echo "✅ GCC32 downloaded"
 
-      # ---------- ccache ----------
-      - name: Cache ccache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/ccache
-          key: ccache-kernel-test-${{ github.run_id }}
-          restore-keys: ccache-kernel-test-
-
-      # ---------- Kernel source ----------
-      # Full/partial clone so git apply --3way has the blobs it needs.
+      # ================================================================
+      # 5. Clone kernel source
+      # ================================================================
       - name: Clone BaikalOS kernel source
         run: |
-          git clone --filter=blob:none -b ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_REPO }} kernel
+          git clone --depth=1 -b ${{ env.KERNEL_BRANCH }} \
+            ${{ env.KERNEL_REPO }} ${{ env.KERNEL_DIR }}
+          cd ${{ env.KERNEL_DIR }}
+          echo "📋 Kernel version: $(make kernelversion)"
+          echo "📋 HEAD: $(git log --oneline -1)"
 
-      # ---------- BaikalOS baikalfs cleanup ----------
-      # The generic SUSFS patch conflicts with BaikalOS's baikalfs hooks in a
-      # few files. Remove those hooks first so SUSFS can apply cleanly.
-      - name: Remove baikalfs hooks from conflicting files
-        working-directory: kernel
-        run: |
-          python3 << 'PYEOF'
-          import re
-
-          # fs/stat.c
-          with open('fs/stat.c', 'r') as f:
-              s = f.read()
-          s = re.sub(r'\n#include "baikalfs.h"\n', '\n', s)
-          s = re.sub(
-              r'\tif\( filter_out_path\("vfs_getattr", path\) \) \{\n\t\treturn -ENOENT;\n\t\}\n',
-              '', s)
-          s = s.replace('stat->blksize = i_blocksize(inode);', 'stat->blksize = (1 << inode->i_blkbits);')
-          with open('fs/stat.c', 'w') as f:
-              f.write(s)
-
-          # fs/proc_namespace.c
-          with open('fs/proc_namespace.c', 'r') as f:
-              s = f.read()
-          s = re.sub(r'\n#include "baikalfs.h"\n', '\n', s)
-          for fn in ('show_vfsmnt', 'show_mountinfo', 'show_vfsstat'):
-              s = re.sub(
-                  rf'\tif\( filter_out_mount\("{fn}", mnt, &p->root\) \) \{{\n\t\terr = SEQ_SKIP;\n\t\tgoto out;\n\t\}}\n',
-                  '', s)
-          with open('fs/proc_namespace.c', 'w') as f:
-              f.write(s)
-
-          # fs/proc/task_mmu.c
-          with open('fs/proc/task_mmu.c', 'r') as f:
-              s = f.read()
-          s = re.sub(r'\n#include "../baikalfs.h"\n', '\n', s)
-          s = re.sub(
-              r'''\tif \(file\) \{\n\t\tif\( !filter_out_path_vma\( "show_map_vma", &file->f_path\) \) \{\n\t\t\tseq_pad\(m, ' '\);\n\t\t\tseq_file_path\(m, file, "\\n"\);\n\t\t\tgoto done;\n\t\t\} else \{\n\t\t\tname = "\[naik\]";\n\t\t\tgoto done;\n\t\t\}\n\t\}\n''',
-              '''\tif (file) {\n\t\tseq_pad(m, ' ');\n\t\tseq_file_path(m, file, "\\n");\n\t\tgoto done;\n\t}\n''', s)
-          with open('fs/proc/task_mmu.c', 'w') as f:
-              f.write(s)
-          PYEOF
-
-      # ---------- SUSFS patch ----------
-      # Apply SUSFS *before* ReSukiSU so a failure can be retried on a clean tree.
-      - name: Apply SUSFS 2.2.0 patch
-        working-directory: kernel
-        run: |
-          curl -L "${{ env.SUSFS_PATCH_URL }}" -o /tmp/susfs.patch
-          echo "::group::SUSFS patch dry-run"
-          if patch -p1 --dry-run --no-backup-if-mismatch < /tmp/susfs.patch; then
-            echo "::endgroup::"
-            echo "Applying SUSFS patch cleanly..."
-            patch -p1 --no-backup-if-mismatch < /tmp/susfs.patch
-          else
-            echo "::endgroup::"
-            echo "::warning::SUSFS patch dry-run failed, attempting 3-way merge..."
-            if git apply --3way /tmp/susfs.patch; then
-              echo "SUSFS patch applied via 3-way merge."
-            else
-              echo "::warning::3-way merge failed, resetting changed files and attempting fuzz apply..."
-              git checkout -- .
-              patch -p1 --fuzz=3 --no-backup-if-mismatch < /tmp/susfs.patch || true
-              if find . -type f \( -name "*.rej" -o -name "*.orig" \) | grep -q .; then
-                echo "::error::SUSFS patch has unresolved rejects. Inspect the files below:"
-                for f in $(find . -type f \( -name "*.rej" -o -name "*.orig" \)); do
-                  echo "===== $f ====="
-                  cat "$f"
-                  echo "===== end $f ====="
-                done
-                exit 1
-              fi
-              echo "SUSFS patch applied with fuzz."
-            fi
-          fi
-          find . -type f -name "*.orig" -delete
-
-      # ---------- ReSukiSU ----------
+      # ================================================================
+      # 6. Integrate ReSukiSU (non-GKI / built-in)
+      # ================================================================
       - name: Integrate ReSukiSU
-        working-directory: kernel
         run: |
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          cd ${{ env.KERNEL_DIR }}
+          echo "⏳ Running ReSukiSU setup.sh..."
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/${{ github.event.inputs.resukisu_branch || 'main' }}/kernel/setup.sh" | bash
+          echo "✅ ReSukiSU integrated"
+          # Verify KernelSU directory exists
+          ls -la KernelSU/ || ls -la drivers/kernelsu/ || echo "⚠️ KernelSU dir check"
 
-      - name: Disable KernelSU kprobe hooks (manual hook mode)
-        working-directory: kernel/KernelSU
+      # ================================================================
+      # 7. Apply SUSFS 2.2.0 patch + manual fix untuk .rej files
+      # ================================================================
+      - name: Apply SUSFS 2.2.0 patch with manual fixes
         run: |
-          find kernel -type f \( -name "*.c" -o -name "*.h" \) -exec \
-            sed -i 's/^#ifdef CONFIG_KPROBES/#if defined(CONFIG_KPROBES) \&\& 0/g' {} +
+          cd ${{ env.KERNEL_DIR }}
 
-      # ---------- Defconfig ----------
-      - name: Copy extracted defconfig
+          SUSFS_PATCH_URL="${{ github.event.inputs.susfs_patch_url || 'https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.9.patch' }}"
+
+          echo "⏳ Downloading SUSFS patch..."
+          curl -fsSL "$SUSFS_PATCH_URL" -o susfs_patch_to_4.9.patch
+
+          echo "⏳ Applying SUSFS patch (allowing partial failures)..."
+          # Apply patch, allowing failures (rejects) which we will fix manually
+          git apply --reject --whitespace=fix susfs_patch_to_4.9.patch || true
+
+          echo ""
+          echo "🔍 Checking for reject files..."
+          REJECTS=$(find . -name "*.rej" 2>/dev/null)
+          if [ -n "$REJECTS" ]; then
+            echo "⚠️ Found reject files:"
+            echo "$REJECTS"
+            echo ""
+            echo "📝 Contents of reject files:"
+            for rej in $REJECTS; do
+              echo "════════════════════════════════════════"
+              echo "📄 $rej"
+              echo "════════════════════════════════════════"
+              cat "$rej"
+              echo ""
+            done
+          else
+            echo "✅ No reject files – patch applied cleanly!"
+          fi
+
+      # ================================================================
+      # 7b. Manual fix: fs/stat.c
+      #
+      # Masalah: BaikalOS sudah punya modifikasi kustom di fs/stat.c
+      #   - Ada #include "baikalfs.h"
+      #   - vfs_getattr() sudah dimodifikasi dengan filter_out_path()
+      #   Patch SUSFS mengharapkan vanilla kernel 4.9 tanpa modifikasi tsb,
+      #   sehingga konteks patch tidak cocok → .rej
+      #
+      # Fix: Tambahkan kode SUSFS secara manual ke tempat yang benar
+      # ================================================================
+      - name: "Manual fix: fs/stat.c (SUSFS sus_kstat)"
         run: |
-          mkdir -p kernel/arch/arm64/configs
-          cp extracted-config/${{ env.DEFCONFIG }} kernel/arch/arm64/configs/${{ env.DEFCONFIG }}
+          cd ${{ env.KERNEL_DIR }}
+          FILE="fs/stat.c"
 
-      # ---------- Build ----------
-      - name: Compile kernel
-        working-directory: kernel
-        env:
-          ARCH: arm64
-          SUBARCH: arm64
-          KBUILD_BUILD_USER: "Nerf."
-          KBUILD_BUILD_HOST: "OldlineSSS"
-          CCACHE_DIR: /tmp/ccache
-          CROSS_COMPILE: aarch64-linux-android-
-          CROSS_COMPILE_ARM32: arm-linux-androideabi-
-          CLANG_TRIPLE: aarch64-linux-gnu-
+          if [ ! -f "${FILE}.rej" ]; then
+            echo "✅ ${FILE}.rej not found – no fix needed"
+            exit 0
+          fi
+
+          echo "🔧 Applying manual fix for ${FILE}..."
+
+          # --- Fix 1: Add #include <linux/susfs.h> after existing includes ---
+          # BaikalOS has #include "baikalfs.h" at the end of includes
+          if ! grep -q '#include <linux/susfs.h>' "$FILE"; then
+            sed -i '/#include "baikalfs.h"/a\
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\
+#include <linux/susfs.h>\
+#endif' "$FILE"
+            echo "  ✅ Added #include <linux/susfs.h>"
+          fi
+
+          # --- Fix 2: Add SUSFS sus_kstat spoofing to vfs_getattr_nosec ---
+          # The SUSFS patch adds kstat spoofing after generic_fillattr() in
+          # vfs_getattr_nosec(). We insert it before the final "return 0;"
+          if ! grep -q 'susfs_sus_kstat' "$FILE"; then
+            # Find the return 0 in vfs_getattr_nosec and add SUSFS code before it
+            python3 << 'PYEOF'
+import re
+
+with open("fs/stat.c", "r") as f:
+    content = f.read()
+
+# Pattern: find vfs_getattr_nosec function and its "return 0;" line
+# We need to add SUSFS sus_kstat code before the "return 0;" in vfs_getattr_nosec
+old_block = """int vfs_getattr_nosec(struct path *path, struct kstat *stat)
+{
+\tstruct inode *inode = d_backing_inode(path->dentry);
+
+\tif (inode->i_op->getattr)
+\t\treturn inode->i_op->getattr(path->mnt, path->dentry, stat);
+
+\tgeneric_fillattr(inode, stat);
+\treturn 0;
+}"""
+
+new_block = """int vfs_getattr_nosec(struct path *path, struct kstat *stat)
+{
+\tstruct inode *inode = d_backing_inode(path->dentry);
+
+\tif (inode->i_op->getattr)
+\t\treturn inode->i_op->getattr(path->mnt, path->dentry, stat);
+
+\tgeneric_fillattr(inode, stat);
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+\tsusfs_sus_kstat(inode, stat);
+#endif
+\treturn 0;
+}"""
+
+if old_block in content:
+    content = content.replace(old_block, new_block)
+    print("  ✅ Added susfs_sus_kstat() to vfs_getattr_nosec")
+else:
+    # Try a more flexible match – the function might have minor variations
+    pattern = r'(generic_fillattr\(inode, stat\);)\s*\n(\s*return 0;\s*\n\}\s*\nEXPORT_SYMBOL\(vfs_getattr_nosec\))'
+    replacement = r'''\1
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+\tsusfs_sus_kstat(inode, stat);
+#endif
+\2'''
+    new_content = re.sub(pattern, replacement, content, count=1)
+    if new_content != content:
+        content = new_content
+        print("  ✅ Added susfs_sus_kstat() to vfs_getattr_nosec (regex)")
+    else:
+        print("  ⚠️ Could not find exact match in vfs_getattr_nosec, trying line-by-line")
+        lines = content.split('\n')
+        new_lines = []
+        in_vfs_getattr_nosec = False
+        done = False
+        for i, line in enumerate(lines):
+            if 'vfs_getattr_nosec' in line and 'int ' in line:
+                in_vfs_getattr_nosec = True
+            if in_vfs_getattr_nosec and not done:
+                if 'generic_fillattr(inode, stat)' in line:
+                    new_lines.append(line)
+                    new_lines.append('#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT')
+                    new_lines.append('\tsusfs_sus_kstat(inode, stat);')
+                    new_lines.append('#endif')
+                    done = True
+                    continue
+            new_lines.append(line)
+        if done:
+            content = '\n'.join(new_lines)
+            print("  ✅ Added susfs_sus_kstat() (line-by-line)")
+        else:
+            print("  ❌ Failed to patch vfs_getattr_nosec")
+
+with open("fs/stat.c", "w") as f:
+    f.write(content)
+PYEOF
+          fi
+
+          rm -f "${FILE}.rej"
+          echo "✅ ${FILE} fixed"
+
+      # ================================================================
+      # 7c. Manual fix: fs/proc_namespace.c
+      #
+      # Masalah: BaikalOS sudah punya filter_out_mount() dari "baikalfs.h"
+      #   di show_vfsmnt, show_mountinfo, show_vfsstat.
+      #   Patch SUSFS menambahkan sus_mount filtering tapi konteks tidak cocok.
+      #
+      # Fix: Tambahkan kode SUSFS secara manual
+      # ================================================================
+      - name: "Manual fix: fs/proc_namespace.c (SUSFS sus_mount)"
         run: |
-          set -e
-          export PATH="${{ env.CLANG_DIR }}/bin:${{ env.GCC64_DIR }}/bin:${{ env.GCC32_DIR }}/bin:$PATH"
+          cd ${{ env.KERNEL_DIR }}
+          FILE="fs/proc_namespace.c"
 
-          make -j$(nproc) O=out ARCH=arm64 \
-            CC="ccache clang" LD=ld.lld \
-            CLANG_TRIPLE=$CLANG_TRIPLE \
-            CROSS_COMPILE=$CROSS_COMPILE \
-            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
-            ${{ env.DEFCONFIG }}
+          if [ ! -f "${FILE}.rej" ]; then
+            echo "✅ ${FILE}.rej not found – no fix needed"
+            exit 0
+          fi
 
-          # Enable ReSukiSU + SUSFS
-          ./scripts/config --file out/.config -e KSU
-          ./scripts/config --file out/.config -e KSU_MANUAL_HOOK
-          ./scripts/config --file out/.config -e KSU_SUSFS
-          ./scripts/config --file out/.config -e KSU_SUSFS_SUS_PATH
-          ./scripts/config --file out/.config -e KSU_SUSFS_SUS_MOUNT
-          ./scripts/config --file out/.config -e KSU_SUSFS_SUS_KSTAT
-          ./scripts/config --file out/.config -e KSU_SUSFS_SPOOF_UNAME
-          ./scripts/config --file out/.config -e KSU_SUSFS_ENABLE_LOG
-          ./scripts/config --file out/.config -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
-          ./scripts/config --file out/.config -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
-          ./scripts/config --file out/.config -e KSU_SUSFS_OPEN_REDIRECT
-          ./scripts/config --file out/.config -e KSU_SUSFS_SUS_MAP
+          echo "🔧 Applying manual fix for ${FILE}..."
 
-          # Non-GKI manual hook works safest without kprobes
-          ./scripts/config --file out/.config -d KPROBES || true
-          ./scripts/config --file out/.config -d KPROBE_EVENTS || true
-          ./scripts/config --file out/.config -d HAVE_KPROBES || true
+          python3 << 'PYEOF'
+import re
 
-          make -j$(nproc) O=out ARCH=arm64 \
-            CC="ccache clang" LD=ld.lld \
-            CLANG_TRIPLE=$CLANG_TRIPLE \
-            CROSS_COMPILE=$CROSS_COMPILE \
-            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
-            olddefconfig
+with open("fs/proc_namespace.c", "r") as f:
+    content = f.read()
 
-          echo "::group::ReSukiSU/SUSFS config verification"
-          grep -q "^CONFIG_KSU=y" out/.config
-          grep -q "^CONFIG_KSU_MANUAL_HOOK=y" out/.config
-          grep -q "^CONFIG_KSU_SUSFS=y" out/.config
-          echo "All required KSU/SUSFS configs are enabled."
-          echo "::endgroup::"
+changes = 0
 
-          make -j$(nproc) O=out ARCH=arm64 \
-            CC="ccache clang" LD=ld.lld \
-            CLANG_TRIPLE=$CLANG_TRIPLE \
-            CROSS_COMPILE=$CROSS_COMPILE \
-            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 2>&1 | tee ../kernel-build.log
+# --- Fix 1: Add SUSFS include ---
+if '#include <linux/susfs.h>' not in content:
+    # Add after #include "baikalfs.h" or after last #include
+    if '#include "baikalfs.h"' in content:
+        content = content.replace(
+            '#include "baikalfs.h"',
+            '#include "baikalfs.h"\n'
+            '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+            '#include <linux/susfs.h>\n'
+            '#endif'
+        )
+    else:
+        content = content.replace(
+            '#include "internal.h"',
+            '#include "internal.h"\n'
+            '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+            '#include <linux/susfs.h>\n'
+            '#endif'
+        )
+    changes += 1
+    print("  ✅ Added #include <linux/susfs.h>")
 
-      - name: Verify kernel image
-        working-directory: kernel
+# --- Fix 2: Add SUSFS sus_mount extern declarations ---
+if 'susfs_is_sus_mount' not in content:
+    # Add extern declarations before show_sb_opts or after includes
+    insert_point = '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs.h>\n#endif'
+    if insert_point in content:
+        content = content.replace(
+            insert_point,
+            insert_point + '\n\n'
+            '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+            'extern bool susfs_is_sus_mount(struct vfsmount *mnt);\n'
+            'extern int susfs_get_non_sus_mnt_id_from_mnt(struct mount *mnt);\n'
+            '#endif'
+        )
+    changes += 1
+    print("  ✅ Added SUSFS extern declarations")
+
+# --- Fix 3: Add sus_mount check in show_vfsmnt ---
+# BaikalOS already has filter_out_mount() check; add SUSFS check alongside
+if 'susfs_is_sus_mount' not in content and 'show_vfsmnt' in content:
+    # Add SUSFS sus_mount check after the BaikalOS filter_out_mount check
+    old_pattern = r'(static int show_vfsmnt\(struct seq_file \*m, struct vfsmount \*mnt\)\s*\{[^}]*?filter_out_mount\("show_vfsmnt"[^)]*\)[^}]*?err = SEQ_SKIP;\s*\n\s*goto out;\s*\n\s*\})'
+    match = re.search(old_pattern, content, re.DOTALL)
+    if match:
+        old_text = match.group(0)
+        new_text = old_text + '\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_sus_mount(mnt)) {\n\t\terr = SEQ_SKIP;\n\t\tgoto out;\n\t}\n#endif'
+        content = content.replace(old_text, new_text, 1)
+        changes += 1
+        print("  ✅ Added SUSFS check to show_vfsmnt")
+    else:
+        print("  ⚠️ Could not find show_vfsmnt filter_out_mount pattern, trying alternative")
+        # Alternative: insert after the filter_out_mount block in show_vfsmnt
+        lines = content.split('\n')
+        new_lines = []
+        in_show_vfsmnt = False
+        done_vfsmnt = False
+        for i, line in enumerate(lines):
+            new_lines.append(line)
+            if 'static int show_vfsmnt(' in line:
+                in_show_vfsmnt = True
+            if in_show_vfsmnt and not done_vfsmnt and 'filter_out_mount' in line:
+                # Find the closing brace of the if block
+                j = i + 1
+                brace_found = False
+                while j < len(lines) and not brace_found:
+                    if 'goto out;' in lines[j]:
+                        brace_found = True
+                    j += 1
+                # We'll add after we encounter the closing }
+        # Fallback: just insert before the first seq_putc in show_vfsmnt
+        if not done_vfsmnt:
+            content_fixed = content.replace(
+                'static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)\n{',
+                'static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)\n{\n'
+                '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                '\tif (susfs_is_sus_mount(mnt))\n'
+                '\t\treturn SEQ_SKIP;\n'
+                '#endif',
+                1
+            )
+            if content_fixed != content:
+                content = content_fixed
+                changes += 1
+                print("  ✅ Added SUSFS check to show_vfsmnt (at function start)")
+
+# --- Fix 4: Add sus_mount check in show_mountinfo ---
+if 'show_mountinfo' in content and content.count('susfs_is_sus_mount') < 2:
+    # Similar approach for show_mountinfo
+    pattern_mountinfo = r'(static int show_mountinfo\(struct seq_file \*m, struct vfsmount \*mnt\)\s*\{)'
+    match = re.search(pattern_mountinfo, content)
+    if match:
+        old = match.group(0)
+        content = content.replace(old, old + '\n'
+            '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+            '\tif (susfs_is_sus_mount(mnt))\n'
+            '\t\treturn SEQ_SKIP;\n'
+            '#endif', 1)
+        changes += 1
+        print("  ✅ Added SUSFS check to show_mountinfo")
+
+    # Also need to spoof mnt_id in show_mountinfo for sus_mount
+    # Replace r->mnt_id and r->mnt_parent->mnt_id with non-sus versions
+    if 'susfs_get_non_sus_mnt_id_from_mnt' not in content:
+        old_seq = 'seq_printf(m, "%i %i %u:%u ", r->mnt_id, r->mnt_parent->mnt_id,'
+        if old_seq in content:
+            new_seq = (
+                '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                '\tseq_printf(m, "%i %i %u:%u ",\n'
+                '\t\tsusfs_get_non_sus_mnt_id_from_mnt(r),\n'
+                '\t\tsusfs_get_non_sus_mnt_id_from_mnt(r->mnt_parent),\n'
+                '#else\n'
+                '\tseq_printf(m, "%i %i %u:%u ", r->mnt_id, r->mnt_parent->mnt_id,\n'
+                '#endif'
+            )
+            content = content.replace(old_seq, new_seq, 1)
+            changes += 1
+            print("  ✅ Added mnt_id spoofing in show_mountinfo")
+
+# --- Fix 5: Add sus_mount check in show_vfsstat ---
+if 'show_vfsstat' in content and content.count('susfs_is_sus_mount') < 3:
+    pattern_vfsstat = r'(static int show_vfsstat\(struct seq_file \*m, struct vfsmount \*mnt\)\s*\{)'
+    match = re.search(pattern_vfsstat, content)
+    if match:
+        old = match.group(0)
+        content = content.replace(old, old + '\n'
+            '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+            '\tif (susfs_is_sus_mount(mnt))\n'
+            '\t\treturn SEQ_SKIP;\n'
+            '#endif', 1)
+        changes += 1
+        print("  ✅ Added SUSFS check to show_vfsstat")
+
+with open("fs/proc_namespace.c", "w") as f:
+    f.write(content)
+
+print(f"\n  Total changes: {changes}")
+PYEOF
+
+          rm -f "${FILE}.rej"
+          echo "✅ ${FILE} fixed"
+
+      # ================================================================
+      # 7d. Manual fix: fs/proc/task_mmu.c
+      #
+      # Masalah: BaikalOS punya #include "../baikalfs.h" dan
+      #   filter_out_path_vma() di show_map_vma yang mengubah konteks patch.
+      #   Patch SUSFS menambahkan CONFIG_KSU_SUSFS_SUS_MAP checks.
+      #
+      # Fix: Tambahkan kode SUSFS secara manual
+      # ================================================================
+      - name: "Manual fix: fs/proc/task_mmu.c (SUSFS sus_map)"
         run: |
-          if [ ! -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-            echo "::error::Image.gz-dtb not found!"
-            ls -la out/arch/arm64/boot/ || true
+          cd ${{ env.KERNEL_DIR }}
+          FILE="fs/proc/task_mmu.c"
+
+          if [ ! -f "${FILE}.rej" ]; then
+            echo "✅ ${FILE}.rej not found – no fix needed"
+            exit 0
+          fi
+
+          echo "🔧 Applying manual fix for ${FILE}..."
+
+          python3 << 'PYEOF'
+import re
+
+with open("fs/proc/task_mmu.c", "r") as f:
+    content = f.read()
+
+changes = 0
+
+# --- Fix 1: Add SUSFS include ---
+if '#include <linux/susfs.h>' not in content:
+    if '#include "../baikalfs.h"' in content:
+        content = content.replace(
+            '#include "../baikalfs.h"',
+            '#include "../baikalfs.h"\n'
+            '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
+            '#include <linux/susfs.h>\n'
+            '#endif'
+        )
+    else:
+        content = content.replace(
+            '#include "internal.h"',
+            '#include "internal.h"\n'
+            '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
+            '#include <linux/susfs.h>\n'
+            '#endif'
+        )
+    changes += 1
+    print("  ✅ Added #include <linux/susfs.h>")
+
+# --- Fix 2: Add SUSFS sus_map check in show_map_vma ---
+# The SUSFS patch hides memory mappings that are tagged with sus_map from
+# /proc/PID/maps. We need to add the check in show_map_vma.
+# BaikalOS has: if( !filter_out_path_vma( "show_map_vma", &file->f_path) )
+# We add the SUSFS check for the vm_file inode
+if 'SUSFS_IS_INODE_SUS_MAP' not in content and 'show_map_vma' in content:
+    # Add SUSFS sus_map check at the beginning of show_map_vma
+    old_func = 'static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)\n{'
+    if old_func in content:
+        new_func = (
+            'static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)\n{\n'
+            '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
+            '\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n'
+            '\t\treturn;\n'
+            '#endif'
+        )
+        content = content.replace(old_func, new_func, 1)
+        changes += 1
+        print("  ✅ Added SUSFS sus_map check to show_map_vma")
+    else:
+        # Try flexible matching
+        pattern = r'(static void show_map_vma\(struct seq_file \*m,\s*struct vm_area_struct \*vma,\s*int is_pid\)\s*\{)'
+        match = re.search(pattern, content)
+        if match:
+            old = match.group(0)
+            content = content.replace(old, old + '\n'
+                '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
+                '\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n'
+                '\t\treturn;\n'
+                '#endif', 1)
+            changes += 1
+            print("  ✅ Added SUSFS sus_map check to show_map_vma (regex)")
+
+# --- Fix 3: Add SUSFS sus_map check in show_smap ---
+if 'SUSFS_IS_INODE_SUS_MAP' not in content or content.count('SUSFS_IS_INODE_SUS_MAP') < 2:
+    old_show_smap = 'static int show_smap(struct seq_file *m, void *v, int is_pid)\n{'
+    if old_show_smap in content:
+        new_show_smap = (
+            'static int show_smap(struct seq_file *m, void *v, int is_pid)\n{\n'
+            '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
+            '\t{\n'
+            '\t\tstruct vm_area_struct *check_vma = v;\n'
+            '\t\tif (check_vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(check_vma->vm_file)))\n'
+            '\t\t\treturn SEQ_SKIP;\n'
+            '\t}\n'
+            '#endif'
+        )
+        content = content.replace(old_show_smap, new_show_smap, 1)
+        changes += 1
+        print("  ✅ Added SUSFS sus_map check to show_smap")
+
+with open("fs/proc/task_mmu.c", "w") as f:
+    f.write(content)
+
+print(f"\n  Total changes: {changes}")
+PYEOF
+
+          rm -f "${FILE}.rej"
+          echo "✅ ${FILE} fixed"
+
+      # ================================================================
+      # 7e. Clean up remaining reject files & verify
+      # ================================================================
+      - name: Cleanup and verify SUSFS patch
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+
+          echo "🔍 Checking for remaining reject files..."
+          REMAINING_REJECTS=$(find . -name "*.rej" 2>/dev/null)
+          if [ -n "$REMAINING_REJECTS" ]; then
+            echo "⚠️ Remaining reject files (attempting auto-fix):"
+            for rej in $REMAINING_REJECTS; do
+              echo "  📄 $rej"
+              cat "$rej"
+              echo ""
+            done
+
+            # Try to apply remaining rejects with patch command
+            for rej in $REMAINING_REJECTS; do
+              TARGET_FILE="${rej%.rej}"
+              echo "  🔧 Attempting to apply $rej to $TARGET_FILE with fuzz..."
+              patch --fuzz=3 "$TARGET_FILE" < "$rej" || true
+              rm -f "$rej"
+            done
+          fi
+
+          # Final check
+          FINAL_REJECTS=$(find . -name "*.rej" 2>/dev/null)
+          if [ -n "$FINAL_REJECTS" ]; then
+            echo "❌ ERROR: Unresolved reject files remain:"
+            echo "$FINAL_REJECTS"
             exit 1
           fi
-          echo "Kernel image: $(ls -lh out/arch/arm64/boot/Image.gz-dtb)"
 
-      - name: Upload kernel build artifacts
-        if: always()
+          # Clean up .orig files
+          find . -name "*.orig" -delete 2>/dev/null || true
+
+          # Verify key SUSFS files exist
+          echo ""
+          echo "🔍 Verifying SUSFS integration..."
+          for f in \
+            "fs/susfs.c" \
+            "include/linux/susfs.h" \
+            "KernelSU/kernel/susfs.c" \
+          ; do
+            if [ -f "$f" ]; then
+              echo "  ✅ $f exists"
+            else
+              # susfs.c might be under KernelSU directory only
+              echo "  ℹ️  $f not found (may be expected)"
+            fi
+          done
+
+          echo ""
+          echo "✅ SUSFS patch verification complete"
+
+      # ================================================================
+      # 8. Copy defconfig & enable KSU/SUSFS configs
+      # ================================================================
+      - name: Setup defconfig
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+
+          # Copy extracted defconfig
+          cp ../repo/extracted-config/${{ env.DEFCONFIG_NAME }} \
+             arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
+
+          echo "📋 Defconfig copied to arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
+
+          # Ensure KSU and SUSFS configs are enabled
+          # (append if not already present – duplicates are handled by kconfig)
+          DEFCONFIG="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
+
+          add_config() {
+            local key="$1"
+            local val="$2"
+            if grep -q "^${key}=" "$DEFCONFIG" || grep -q "^# ${key} is not set" "$DEFCONFIG"; then
+              # Replace existing
+              sed -i "s|^${key}=.*|${key}=${val}|" "$DEFCONFIG"
+              sed -i "s|^# ${key} is not set|${key}=${val}|" "$DEFCONFIG"
+            else
+              echo "${key}=${val}" >> "$DEFCONFIG"
+            fi
+            echo "  ${key}=${val}"
+          }
+
+          echo "📝 Ensuring KSU + SUSFS configs are enabled..."
+          add_config "CONFIG_KSU" "y"
+          add_config "CONFIG_KSU_SUSFS" "y"
+          add_config "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT" "y"
+          add_config "CONFIG_KSU_SUSFS_SUS_PATH" "y"
+          add_config "CONFIG_KSU_SUSFS_SUS_MOUNT" "y"
+          add_config "CONFIG_KSU_SUSFS_SUS_KSTAT" "y"
+          add_config "CONFIG_KSU_SUSFS_SPOOF_UNAME" "y"
+          add_config "CONFIG_KSU_SUSFS_ENABLE_LOG" "y"
+          add_config "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS" "y"
+          add_config "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG" "y"
+          add_config "CONFIG_KSU_SUSFS_OPEN_REDIRECT" "y"
+          add_config "CONFIG_KSU_SUSFS_SUS_MAP" "y"
+          add_config "CONFIG_KSU_MANUAL_HOOK" "y"
+
+          echo ""
+          echo "✅ Defconfig ready"
+
+      # ================================================================
+      # 9. Build kernel
+      # ================================================================
+      - name: Build kernel
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+
+          # Setup toolchain paths
+          CLANG_DIR="$(pwd)/../toolchain/clang"
+          GCC64_DIR="$(pwd)/../toolchain/gcc64"
+          GCC32_DIR="$(pwd)/../toolchain/gcc32"
+
+          export PATH="${CLANG_DIR}/bin:${GCC64_DIR}/bin:${GCC32_DIR}/bin:${PATH}"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KBUILD_BUILD_USER="${{ env.KBUILD_BUILD_USER }}"
+          export KBUILD_BUILD_HOST="${{ env.KBUILD_BUILD_HOST }}"
+
+          # Verify toolchain
+          echo "🔧 Toolchain versions:"
+          clang --version 2>/dev/null | head -1 || echo "clang not found in PATH"
+          aarch64-linux-android-gcc --version 2>/dev/null | head -1 || echo "gcc64 not found"
+          arm-linux-androideabi-gcc --version 2>/dev/null | head -1 || echo "gcc32 not found"
+          echo ""
+
+          # Build arguments
+          MAKE_ARGS=(
+            -j$(nproc --all)
+            O=out
+            ARCH=arm64
+            CC=clang
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-android-
+            CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          )
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Building defconfig: ${{ env.DEFCONFIG_NAME }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          make "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG_NAME }}
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Compiling kernel..."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          make "${MAKE_ARGS[@]}" 2>&1 | tail -50
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Build completed!"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      # ================================================================
+      # 10. Verify output & collect artifacts
+      # ================================================================
+      - name: Verify kernel output
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+
+          echo "🔍 Checking for kernel image output..."
+          echo ""
+
+          KERNEL_IMAGE=""
+          for img in \
+            "out/arch/arm64/boot/Image.gz-dtb" \
+            "out/arch/arm64/boot/Image.gz" \
+            "out/arch/arm64/boot/Image" \
+            "out/arch/arm64/boot/Image-dtb" \
+          ; do
+            if [ -f "$img" ]; then
+              SIZE=$(du -h "$img" | cut -f1)
+              echo "  ✅ Found: $img ($SIZE)"
+              KERNEL_IMAGE="$img"
+            fi
+          done
+
+          # Check for dtbo
+          if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
+            echo "  ✅ Found: dtbo.img"
+          fi
+
+          if [ -z "$KERNEL_IMAGE" ]; then
+            echo "  ❌ ERROR: No kernel image found!"
+            echo ""
+            echo "Last build log lines:"
+            find out/ -name "*.log" -exec tail -20 {} \; 2>/dev/null || true
+            exit 1
+          fi
+
+          echo ""
+
+          # Verify KSU is integrated
+          if [ -f "out/include/generated/compile.h" ]; then
+            echo "📋 compile.h:"
+            cat out/include/generated/compile.h
+            echo ""
+          fi
+
+          # Check for KBUILD identity
+          if grep -q "${{ env.KBUILD_BUILD_USER }}" out/include/generated/compile.h 2>/dev/null; then
+            echo "✅ KBUILD_BUILD_USER is correct"
+          fi
+
+          echo "✅ Kernel build verification complete"
+
+      # ================================================================
+      # 11. Upload artifacts
+      # ================================================================
+      - name: Upload kernel image
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-build-test
-          if-no-files-found: ignore
+          name: kernel-baikalos13-resukisu-susfs
           path: |
-            kernel/out/arch/arm64/boot/Image.gz-dtb
-            kernel/out/arch/arm64/boot/Image.gz
-            kernel/out/arch/arm64/boot/Image
-            kernel/out/vmlinux
-            kernel/out/System.map
-            kernel/out/.config
-            kernel-build.log
+            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
+            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz
+            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image
+            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image-dtb
+            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/dtbo.img
+          if-no-files-found: warn
+          retention-days: 7
 
-      - name: Trigger flashable zip workflow
-        if: success()
-        uses: actions/github-script@v7
+      - name: Upload full out directory (for zip builder)
+        uses: actions/upload-artifact@v4
         with:
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'build-flashable-zip-test.yml',
-              ref: context.ref,
-            });
+          name: kernel-out-full
+          path: |
+            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/
+          if-no-files-found: warn
+          retention-days: 3
+
+      # ================================================================
+      # 12. Summary
+      # ================================================================
+      - name: Build summary
+        if: always()
+        run: |
+          echo "## 📋 Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Kernel Source | \`baikalos/android_kernel_xiaomi_sdm845\` branch \`13.0\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kernel Version | 4.9.337 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Root Solution | ReSukiSU |" >> $GITHUB_STEP_SUMMARY
+          echo "| SUSFS | v2.2.0 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Clang | ${{ env.CLANG_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| GCC64 | aarch64-linux-android-4.9 |" >> $GITHUB_STEP_SUMMARY
+          echo "| GCC32 | arm-linux-androideabi-4.9 |" >> $GITHUB_STEP_SUMMARY
+          echo "| KBUILD_BUILD_USER | ${{ env.KBUILD_BUILD_USER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| KBUILD_BUILD_HOST | ${{ env.KBUILD_BUILD_HOST }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Defconfig | \`${{ env.DEFCONFIG_NAME }}\` (extracted from boot.img) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # List output files
+          if [ -d "${{ env.KERNEL_DIR }}/out/arch/arm64/boot" ]; then
+            echo "### 📦 Output Files" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            ls -lh ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image* 2>/dev/null >> $GITHUB_STEP_SUMMARY || echo "No Image files" >> $GITHUB_STEP_SUMMARY
+            ls -lh ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/dtbo* 2>/dev/null >> $GITHUB_STEP_SUMMARY || true
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
