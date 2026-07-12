@@ -1,4 +1,4 @@
-name: Compile Kernel (BaikalOS 13.0 + ReSukiSU + SUSFS)
+name: 3. Compile Kernel (BaikalOS 13.0 + ReSukiSU + SUSFS)
 
 on:
   workflow_dispatch:
