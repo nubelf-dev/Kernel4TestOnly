@@ -47,7 +47,7 @@ env:
   # Kalau kamu sudah punya mirror clang-r487747c.tar.gz sendiri (rilis GitHub / storage lain),
   # isi lewat repo variable CLANG_URL supaya tidak perlu clone AOSP yang berat.
   # Contoh: https://github.com/<user>/clang-prebuilts/releases/download/r487747c/clang-r487747c.tar.gz
-  CLANG_URL: ${{ https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz }}
+  CLANG_URL: https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz
   GCC64_URL: ${{ vars.GCC64_URL }}
   GCC32_URL: ${{ vars.GCC32_URL }}
 
