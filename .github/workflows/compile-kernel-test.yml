@@ -631,22 +631,30 @@ jobs:
           arm-linux-androideabi-gcc --version 2>/dev/null | head -1 || echo "gcc32 not found"
           echo ""
 
-          # Masuk ke folder kernel
+          # Masuk ke direktori kernel
           cd ${{ env.KERNEL_DIR }}
 
-          # Definisi Argument Build (Menggunakan CC_AS untuk fix vdso)
+          # [Trik Khusus VDSO]
+          # Mengganti CC dan LD di Makefile khusus vdso agar menggunakan GCC
+          # agar error "junk at end of line" hilang selamanya.
+          if [ -f arch/arm64/kernel/vdso/Makefile ]; then
+            echo "[INFO] Patching VDSO Makefile untuk menggunakan GCC..."
+            sed -i 's|CC := $(CC)|CC := $(CROSS_COMPILE)gcc|g' arch/arm64/kernel/vdso/Makefile
+            sed -i 's|LD := $(LD)|LD := $(CROSS_COMPILE)ld|g' arch/arm64/kernel/vdso/Makefile
+          fi
+
+          # Definisi Argument Build (Kembali ke mode Clang penuh)
           MAKE_ARGS=(
             -j$(nproc --all)
             O=out
             ARCH=arm64
             CC=clang
-            CC_AS=aarch64-linux-android-gcc
             CLANG_TRIPLE=aarch64-linux-gnu-
             CROSS_COMPILE=aarch64-linux-android-
             CROSS_COMPILE_ARM32=arm-linux-androideabi-
-            LLVM_IAS=0
+            # Tidak perlu LLVM_IAS=0 jika sudah dipatch via sed, 
+            # tapi tidak apa-apa jika ingin tetap dipasang.
           )
-
           echo "================================================"
           echo "  Building defconfig: ${{ env.DEFCONFIG_NAME }}"
           echo "================================================"
