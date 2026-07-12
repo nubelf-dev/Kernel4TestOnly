@@ -520,7 +520,6 @@ jobs:
             # memilih default lain (kprobes), membuat hook manual yang sudah disuntik
             # tidak pernah aktif/dipakai. Nama config ini sudah diverifikasi langsung
             # dari dokumentasi resmi: https://resukisu.github.io/guide/manual-integrate.html
-            echo "CONFIG_KSU_MANUAL_HOOK=y"
             echo "CONFIG_KSU_SUSFS=y"
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
             echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
