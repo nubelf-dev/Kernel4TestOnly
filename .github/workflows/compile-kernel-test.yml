@@ -209,7 +209,7 @@ jobs:
       #
       # Fix: Tambahkan kode SUSFS secara manual ke tempat yang benar
       # ================================================================
-      - name: "Manual fix: fs/stat.c (SUSFS sus_kstat)"
+      - name: Manual fix: fs/stat.c (SUSFS sus_kstat)
         run: |
           cd ${{ env.KERNEL_DIR }}
           FILE="fs/stat.c"
