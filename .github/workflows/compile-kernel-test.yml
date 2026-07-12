@@ -238,6 +238,37 @@ jobs:
             echo "[OK] No reject files"
           fi
 
+      - name: DEBUG - Show SUSFS symbol definitions
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+
+          echo "======================================================"
+          echo "  1. Cari susfs_is_hide_sus_mnts_for_non_su_procs_enabled"
+          echo "======================================================"
+          grep -rn "susfs_is_hide_sus_mnts_for_non_su_procs" \
+            fs/ include/linux/ KernelSU/ 2>/dev/null | head -30
+
+          echo ""
+          echo "======================================================"
+          echo "  2. Cari DEFINE_STATIC_KEY di SUSFS"
+          echo "======================================================"
+          grep -rn "DEFINE_STATIC_KEY\|susfs_is.*_enabled" \
+            fs/ include/linux/ KernelSU/ 2>/dev/null | head -30
+
+          echo ""
+          echo "======================================================"
+          echo "  3. Lihat isi include/linux/susfs.h dan susfs_def.h"
+          echo "======================================================"
+          [ -f include/linux/susfs.h ] && echo "== susfs.h ==" && head -80 include/linux/susfs.h
+          echo ""
+          [ -f include/linux/susfs_def.h ] && echo "== susfs_def.h ==" && head -80 include/linux/susfs_def.h
+
+          echo ""
+          echo "======================================================"
+          echo "  4. Lihat baris 480-520 di fs/proc_namespace.c"
+          echo "======================================================"
+          sed -n '480,520p' fs/proc_namespace.c
+      
       # ================================================================
       # 8. Manual fix SUSFS hunks
       # ================================================================
@@ -282,7 +313,7 @@ jobs:
           PYEOF
           fi
 
-          # Tambah include SUSFS ke semua file terkait
+          # Tambah include SUSFS + jump_label ke semua file terkait
           python3 <<'PYEOF'
           from pathlib import Path
           for filepath in ["fs/open.c", "fs/stat.c", "fs/proc_namespace.c", "fs/proc/task_mmu.c", "fs/proc/cmdline.c"]:
@@ -292,7 +323,8 @@ jobs:
               lines = p.read_text().split('\n')
               has_susfs = any('linux/susfs.h' in l for l in lines)
               has_susfs_def = any('linux/susfs_def.h' in l for l in lines)
-              if has_susfs and has_susfs_def:
+              has_jump = any('linux/jump_label.h' in l for l in lines)
+              if has_susfs and has_susfs_def and has_jump:
                   continue
               insert_idx = -1
               for i, line in enumerate(lines):
@@ -302,6 +334,8 @@ jobs:
               if insert_idx == -1:
                   continue
               new_includes = []
+              if not has_jump:
+                  new_includes.append('#include <linux/jump_label.h>')
               if not has_susfs:
                   new_includes.append('#include <linux/susfs.h>')
               if not has_susfs_def:
@@ -312,7 +346,8 @@ jobs:
           PYEOF
 
           # Tambah extern declarations di proc_namespace.c
-          if [ -f fs/proc_namespace.c ] && ! grep -q "extern bool susfs_is_current_ksu_domain" fs/proc_namespace.c; then
+          # PENTING: symbol name & type harus MATCH dengan definisi di susfs.c
+          if [ -f fs/proc_namespace.c ] && ! grep -q "susfs_is_hide_sus_mnts_for_non_su_procs_enabled" fs/proc_namespace.c; then
             python3 <<'PYEOF'
           from pathlib import Path
           p = Path("fs/proc_namespace.c")
@@ -326,7 +361,7 @@ jobs:
                       '',
                       '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT',
                       'extern bool susfs_is_current_ksu_domain(void);',
-                      'extern bool susfs_hide_sus_mnts_for_non_su_procs;',
+                      'extern struct static_key_false susfs_is_hide_sus_mnts_for_non_su_procs_enabled;',
                       '#endif',
                       ''
                   ])
