@@ -611,7 +611,7 @@ jobs:
 
       - name: Patch arch/arm64/Makefile (fix clang vdso32 "-EL" assembler error)
         run: |
-          cd kernel-src
+          cd ${{ env.KERNEL_DIR }}
           MAIN_MK="arch/arm64/Makefile"
 
           if [ ! -f "$MAIN_MK" ]; then
@@ -649,7 +649,7 @@ jobs:
 
       - name: Skip DTB yang tidak relevan/rusak (QVR headset, interposer SDM670)
         run: |
-          cd kernel-src
+          cd ${{ env.KERNEL_DIR }}
           DTS_MK="arch/arm64/boot/dts/qcom/Makefile"
 
           if [ ! -f "$DTS_MK" ]; then
