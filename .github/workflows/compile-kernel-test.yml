@@ -200,6 +200,22 @@ jobs:
             curl -LSs "$RESUKISU_SETUP_URL" | bash -s main
           fi
 
+      # Checkpoint git bersih pasca-ReSukiSU. Dipakai untuk me-reset kernel
+      # source ke kondisi ini sebelum SETIAP percobaan patch SUSFS di bawah,
+      # supaya tiap percobaan mulai dari kondisi yang sama persis dan tidak
+      # numpuk di atas sisa percobaan sebelumnya yang gagal sebagian
+      # (kalau numpuk, file yang tadinya berhasil clean bisa ikut kelihatan
+      # "conflict" padahal itu cuma efek tumpukan, bukan kegagalan asli).
+      - name: Checkpoint git sebelum patch SUSFS
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          set -e
+          git config user.email "action@github.com"
+          git config user.name "github-actions"
+          git add -A
+          git commit -q -m "chore: checkpoint sebelum patch SUSFS" --allow-empty
+          echo "SUSFS_CHECKPOINT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       # -----------------------------------------------------------------
       # 6. Terapkan patch SUSFS 2.2.0 + fallback kalau gagal patch
       #
@@ -224,7 +240,13 @@ jobs:
           set +e
           PATCH_FILE=../susfs_patch_to_4.9.patch
 
+          reset_clean() {
+            git reset --hard "$SUSFS_CHECKPOINT" -q
+            git clean -fd -q
+          }
+
           echo "==> Percobaan 1: git apply (strict, ignore-whitespace)"
+          reset_clean
           git apply --check --ignore-whitespace --ignore-space-change "$PATCH_FILE" 2>err1.log
           if [ $? -eq 0 ]; then
             git apply --ignore-whitespace --ignore-space-change "$PATCH_FILE"
@@ -234,6 +256,7 @@ jobs:
           cat err1.log
 
           echo "==> Percobaan 2: git apply dengan 3-way merge"
+          reset_clean
           git apply -3 --ignore-whitespace --ignore-space-change "$PATCH_FILE" 2>err2.log
           if [ $? -eq 0 ]; then
             echo "Patch berhasil diterapkan (3-way merge)."
@@ -242,6 +265,7 @@ jobs:
           cat err2.log
 
           echo "==> Percobaan 3: patch klasik, fuzz tinggi + abaikan whitespace"
+          reset_clean
           patch -p1 --fuzz=5 --ignore-whitespace -l --no-backup-if-mismatch < "$PATCH_FILE" > patch3.log 2>&1
           RESULT3=$?
           cat patch3.log
@@ -253,8 +277,7 @@ jobs:
 
           echo "==> Percobaan 4: patch --merge (sisipkan conflict marker <<<<<<< di file yang gagal)"
           echo "    supaya sisa hunk yang gagal bisa diperbaiki LANGSUNG di file, bukan lewat .rej terpisah."
-          find . -name "*.rej" -delete
-          find . -name "*.orig" -delete
+          reset_clean
           patch -p1 --fuzz=5 --ignore-whitespace -l --merge < "$PATCH_FILE" > patch4.log 2>&1
           cat patch4.log
 
