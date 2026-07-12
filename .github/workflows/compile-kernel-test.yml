@@ -5,7 +5,7 @@
 #
 #  Alur repo:
 #    .github/workflows/
-#    +-- compile-kernel-test.yml       <- file ini
+#    +-- compile-kernel-test.yml       (file ini)
 #    +-- build-flashable-zip-test.yml
 #    extracted-config/
 #    +-- bos13_defconfig
@@ -35,27 +35,21 @@ on:
         default: "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.9.patch"
 
 env:
-  # -- Kernel source --
   KERNEL_REPO: https://github.com/baikalos/android_kernel_xiaomi_sdm845
   KERNEL_BRANCH: "13.0"
   KERNEL_DIR: android_kernel_xiaomi_sdm845
 
-  # -- Defconfig --
-  # Defconfig hasil extract-ikconfig dari boot.img BaikalOS 13.0
   DEFCONFIG_NAME: bos13_defconfig
 
-  # -- Build identity (jangan ubah nama kernel - ikut defconfig asli) --
   KBUILD_BUILD_USER: "Nerf."
   KBUILD_BUILD_HOST: "OldlineSSS"
 
-  # -- Toolchain --
   CLANG_VERSION: clang-r487747c
   CLANG_URL: "https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz"
   GCC64_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
   GCC32_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
   GCC_BRANCH: android-13.0.0_r1
 
-  # -- ReSukiSU --
   RESUKISU_REPO: https://github.com/ReSukiSU/ReSukiSU
 
 jobs:
@@ -98,7 +92,7 @@ jobs:
           path: toolchain/clang
           key: clang-${{ env.CLANG_VERSION }}-v1
 
-      - name: Download Clang (if cache miss)
+      - name: "Download Clang (if cache miss)"
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
           mkdir -p toolchain/clang
@@ -112,28 +106,28 @@ jobs:
       # ================================================================
       # 4. Cache GCC toolchains
       # ================================================================
-      - name: Cache GCC64 (aarch64-linux-android-4.9)
+      - name: "Cache GCC64 (aarch64-linux-android-4.9)"
         id: cache-gcc64
         uses: actions/cache@v4
         with:
           path: toolchain/gcc64
           key: gcc64-aarch64-4.9-${{ env.GCC_BRANCH }}-v1
 
-      - name: Download GCC64 (if cache miss)
+      - name: "Download GCC64 (if cache miss)"
         if: steps.cache-gcc64.outputs.cache-hit != 'true'
         run: |
           git clone --depth=1 -b ${{ env.GCC_BRANCH }} \
             ${{ env.GCC64_REPO }} toolchain/gcc64
           echo "[OK] GCC64 downloaded"
 
-      - name: Cache GCC32 (arm-linux-androideabi-4.9)
+      - name: "Cache GCC32 (arm-linux-androideabi-4.9)"
         id: cache-gcc32
         uses: actions/cache@v4
         with:
           path: toolchain/gcc32
           key: gcc32-arm-4.9-${{ env.GCC_BRANCH }}-v1
 
-      - name: Download GCC32 (if cache miss)
+      - name: "Download GCC32 (if cache miss)"
         if: steps.cache-gcc32.outputs.cache-hit != 'true'
         run: |
           git clone --depth=1 -b ${{ env.GCC_BRANCH }} \
@@ -198,16 +192,8 @@ jobs:
 
       # ================================================================
       # 7b. Manual fix: fs/stat.c
-      #
-      # Masalah: BaikalOS sudah punya modifikasi kustom di fs/stat.c
-      #   - Ada #include "baikalfs.h"
-      #   - vfs_getattr() sudah dimodifikasi dengan filter_out_path()
-      #   Patch SUSFS mengharapkan vanilla kernel 4.9 tanpa modifikasi tsb,
-      #   sehingga konteks patch tidak cocok -> .rej
-      #
-      # Fix: Tambahkan kode SUSFS secara manual ke tempat yang benar
       # ================================================================
-      - name: Manual fix fs/stat.c (SUSFS sus_kstat)
+      - name: "Manual fix fs/stat.c (SUSFS sus_kstat)"
         run: |
           cd ${{ env.KERNEL_DIR }}
           FILE="fs/stat.c"
@@ -219,7 +205,6 @@ jobs:
 
           echo "[FIX] Applying manual fix for ${FILE}..."
 
-          # --- Fix 1: Add #include <linux/susfs.h> after existing includes ---
           if ! grep -q '#include <linux/susfs.h>' "$FILE"; then
             sed -i '/#include "baikalfs.h"/a\
 #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\
@@ -228,7 +213,6 @@ jobs:
             echo "  [OK] Added #include <linux/susfs.h>"
           fi
 
-          # --- Fix 2: Add SUSFS sus_kstat spoofing to vfs_getattr_nosec ---
           if ! grep -q 'susfs_sus_kstat' "$FILE"; then
             python3 <<'PYEOF'
 import re
@@ -307,14 +291,8 @@ PYEOF
 
       # ================================================================
       # 7c. Manual fix: fs/proc_namespace.c
-      #
-      # Masalah: BaikalOS sudah punya filter_out_mount() dari "baikalfs.h"
-      #   di show_vfsmnt, show_mountinfo, show_vfsstat.
-      #   Patch SUSFS menambahkan sus_mount filtering tapi konteks tidak cocok.
-      #
-      # Fix: Tambahkan kode SUSFS secara manual
       # ================================================================
-      - name: Manual fix fs/proc_namespace.c (SUSFS sus_mount)
+      - name: "Manual fix fs/proc_namespace.c (SUSFS sus_mount)"
         run: |
           cd ${{ env.KERNEL_DIR }}
           FILE="fs/proc_namespace.c"
@@ -334,7 +312,6 @@ with open("fs/proc_namespace.c", "r") as f:
 
 changes = 0
 
-# --- Fix 1: Add SUSFS include ---
 if '#include <linux/susfs.h>' not in content:
     if '#include "baikalfs.h"' in content:
         content = content.replace(
@@ -355,7 +332,6 @@ if '#include <linux/susfs.h>' not in content:
     changes += 1
     print("  [OK] Added #include <linux/susfs.h>")
 
-# --- Fix 2: Add SUSFS sus_mount extern declarations ---
 if 'susfs_is_sus_mount' not in content:
     insert_point = '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs.h>\n#endif'
     if insert_point in content:
@@ -370,7 +346,6 @@ if 'susfs_is_sus_mount' not in content:
     changes += 1
     print("  [OK] Added SUSFS extern declarations")
 
-# --- Fix 3: Add sus_mount check in show_vfsmnt ---
 if 'susfs_is_sus_mount' not in content and 'show_vfsmnt' in content:
     old_pattern = r'(static int show_vfsmnt\(struct seq_file \*m, struct vfsmount \*mnt\)\s*\{[^}]*?filter_out_mount\("show_vfsmnt"[^)]*\)[^}]*?err = SEQ_SKIP;\s*\n\s*goto out;\s*\n\s*\})'
     match = re.search(old_pattern, content, re.DOTALL)
@@ -396,7 +371,6 @@ if 'susfs_is_sus_mount' not in content and 'show_vfsmnt' in content:
             changes += 1
             print("  [OK] Added SUSFS check to show_vfsmnt (fallback)")
 
-# --- Fix 4: Add sus_mount check in show_mountinfo ---
 if 'show_mountinfo' in content and content.count('susfs_is_sus_mount') < 2:
     pattern_mountinfo = r'(static int show_mountinfo\(struct seq_file \*m, struct vfsmount \*mnt\)\s*\{)'
     match = re.search(pattern_mountinfo, content)
@@ -426,7 +400,6 @@ if 'show_mountinfo' in content and content.count('susfs_is_sus_mount') < 2:
             changes += 1
             print("  [OK] Added mnt_id spoofing in show_mountinfo")
 
-# --- Fix 5: Add sus_mount check in show_vfsstat ---
 if 'show_vfsstat' in content and content.count('susfs_is_sus_mount') < 3:
     pattern_vfsstat = r'(static int show_vfsstat\(struct seq_file \*m, struct vfsmount \*mnt\)\s*\{)'
     match = re.search(pattern_vfsstat, content)
@@ -452,14 +425,8 @@ PYEOF
 
       # ================================================================
       # 7d. Manual fix: fs/proc/task_mmu.c
-      #
-      # Masalah: BaikalOS punya #include "../baikalfs.h" dan
-      #   filter_out_path_vma() di show_map_vma yang mengubah konteks patch.
-      #   Patch SUSFS menambahkan CONFIG_KSU_SUSFS_SUS_MAP checks.
-      #
-      # Fix: Tambahkan kode SUSFS secara manual
       # ================================================================
-      - name: Manual fix fs/proc/task_mmu.c (SUSFS sus_map)
+      - name: "Manual fix fs/proc/task_mmu.c (SUSFS sus_map)"
         run: |
           cd ${{ env.KERNEL_DIR }}
           FILE="fs/proc/task_mmu.c"
@@ -479,7 +446,6 @@ with open("fs/proc/task_mmu.c", "r") as f:
 
 changes = 0
 
-# --- Fix 1: Add SUSFS include ---
 if '#include <linux/susfs.h>' not in content:
     if '#include "../baikalfs.h"' in content:
         content = content.replace(
@@ -500,7 +466,6 @@ if '#include <linux/susfs.h>' not in content:
     changes += 1
     print("  [OK] Added #include <linux/susfs.h>")
 
-# --- Fix 2: Add SUSFS sus_map check in show_map_vma ---
 if 'SUSFS_IS_INODE_SUS_MAP' not in content and 'show_map_vma' in content:
     old_func = 'static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)\n{'
     if old_func in content:
@@ -527,7 +492,6 @@ if 'SUSFS_IS_INODE_SUS_MAP' not in content and 'show_map_vma' in content:
             changes += 1
             print("  [OK] Added SUSFS sus_map check to show_map_vma (regex)")
 
-# --- Fix 3: Add SUSFS sus_map check in show_smap ---
 if 'SUSFS_IS_INODE_SUS_MAP' not in content or content.count('SUSFS_IS_INODE_SUS_MAP') < 2:
     old_show_smap = 'static int show_smap(struct seq_file *m, void *v, int is_pid)\n{'
     if old_show_smap in content:
@@ -765,7 +729,7 @@ PYEOF
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Upload full out directory (for zip builder)
+      - name: "Upload full out directory (for zip builder)"
         uses: actions/upload-artifact@v4
         with:
           name: kernel-out-full
