@@ -117,6 +117,91 @@ jobs:
           echo "[OK] ReSukiSU integrated"
           ls -la KernelSU/ || ls -la drivers/kernelsu/ || echo "[WARN] KernelSU dir check"
 
+      # ============================================================
+      # STEP Generate ksu_hook.h dari signature ASLI (7 hooks)
+      # ============================================================
+      - name: Generate ksu_hook.h (7 hooks - signature ASLI)
+        run: |
+          cd kernel-src
+
+          python3 << 'PYEOF'
+          import re
+          from pathlib import Path
+
+          ksu_dirs = ['KernelSU', 'KernelSU-Next', 'ReSukiSU']
+          ksu_dir = next((d for d in ksu_dirs if Path(d).exists()), None)
+          if not ksu_dir:
+              print("[FAIL] KSU source dir not found")
+              exit(1)
+
+          signatures = {}
+          for pattern in ['*.c', '*.h']:
+              for f in Path(ksu_dir).rglob(pattern):
+                  try:
+                      text = f.read_text(errors='replace')
+                  except:
+                      continue
+                  for m in re.finditer(
+                      r'\b(?:int|void)\s+(ksu_handle_\w+)\s*\(([^)]*)\)\s*[;{]',
+                      text, re.MULTILINE
+                  ):
+                      name = m.group(1)
+                      params = m.group(2).strip()
+                      full_match = m.group(0)
+                      rettype = 'int' if full_match.strip().startswith('int') else 'void'
+                      if name == 'ksu_handle_stat':
+                          if 'const char __user' in params:
+                              signatures[name] = (rettype, params)
+                          elif name not in signatures:
+                              signatures[name] = (rettype, params)
+                      else:
+                          if name not in signatures or '{' in text[m.end()-1:m.end()]:
+                              signatures[name] = (rettype, params)
+
+          # 7 hook WAJIB yang harus di-inject di kernel source
+          wajib_hooks = {
+              'ksu_handle_execveat',
+              'ksu_handle_faccessat',
+              'ksu_handle_stat',
+              'ksu_handle_sys_read',
+              'ksu_handle_setresuid',
+              'ksu_handle_sys_reboot',
+              'ksu_handle_input_handle_event',
+          }
+
+          print(f"Total extracted: {len(signatures)}")
+          print()
+
+          header = [
+              '/* Auto-generated ksu_hook.h - 7 hook wajib (signature ASLI) */',
+              '#ifndef __KSU_HOOK_H',
+              '#define __KSU_HOOK_H',
+              '',
+              '#include <linux/types.h>',
+              '#include <linux/uidgid.h>',
+              '',
+              'struct file;',
+              'struct filename;',
+              '',
+          ]
+
+          for name in sorted(wajib_hooks):
+              if name in signatures:
+                  rettype, params = signatures[name]
+                  header.append(f'extern {rettype} {name}({params});')
+                  print(f"  ✓ {rettype} {name}({params})")
+              else:
+                  print(f"  ⚠ Missing in source: {name}")
+
+          header.append('')
+          header.append('#endif')
+
+          Path('include/linux/ksu_hook.h').write_text('\n'.join(header))
+          print()
+          print("== Contents ==")
+          print(Path('include/linux/ksu_hook.h').read_text())
+          PYEOF
+
       - name: Apply SUSFS patch
         run: |
           cd ${{ env.KERNEL_DIR }}
@@ -442,6 +527,120 @@ jobs:
 
           rm -f "${FILE}.rej"
           echo "[OK] ${FILE} fixed"
+
+      # ============================================================
+      # STEP Inject 7 hook WAJIB dengan signature ASLI
+      # ============================================================
+      - name: Apply 7 hook WAJIB (signature ASLI dari source)
+        run: |
+          cd kernel-src
+
+          inject_hook() {
+            local file="$1"
+            local func_pat="$2"
+            local hook_line="$3"
+            [ -f "$file" ] || return 1
+            awk -v pat="$func_pat" -v hook="$hook_line" '
+              $0 ~ pat { in_func=1 }
+              in_func && /^\{/ && !done {
+                print
+                print "\t/* ReSukiSU hook */"
+                print "\t" hook
+                done=1; in_func=0; next
+              }
+              { print }
+            ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+          }
+
+          add_include() {
+            local file="$1"
+            [ -f "$file" ] || return
+            if ! grep -q "linux/ksu_hook.h" "$file"; then
+              sed -i '0,/^#include/s||#include <linux/ksu_hook.h>\n&|' "$file"
+            fi
+          }
+
+          # 1. execveat
+          # signature: int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
+          #                                    void *argv, void *envp, int *flags)
+          add_include fs/exec.c
+          if ! grep -q "ksu_handle_execveat" fs/exec.c; then
+            inject_hook fs/exec.c "static int do_execveat_common" \
+              "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"
+            if ! grep -q "ksu_handle_execveat" fs/exec.c; then
+              inject_hook fs/exec.c "int do_execveat_common" \
+                "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"
+            fi
+          fi
+
+          # 2. faccessat
+          # signature: int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
+          #                                     int *mode, int *__unused_flags)
+          add_include fs/open.c
+          if ! grep -q "ksu_handle_faccessat" fs/open.c; then
+            inject_hook fs/open.c "SYSCALL_DEFINE3.faccessat" \
+              "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"
+          fi
+
+          # 3. stat
+          # signature: int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags)
+          # Note: kernel 4.9 pakai 'flag' (singular), bukan 'flags'
+          add_include fs/stat.c
+          if ! grep -q "ksu_handle_stat" fs/stat.c; then
+            inject_hook fs/stat.c "SYSCALL_DEFINE4.newfstatat" \
+              "ksu_handle_stat(&dfd, &filename, &flag);"
+          fi
+
+          # 4. sys_read
+          # signature: int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr,
+          #                                    size_t *count_ptr)
+          add_include fs/read_write.c
+          if ! grep -q "ksu_handle_sys_read" fs/read_write.c; then
+            inject_hook fs/read_write.c "SYSCALL_DEFINE3.read" \
+              "ksu_handle_sys_read(fd, &buf, &count);"
+          fi
+
+          # 5. setresuid
+          # signature: int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
+          add_include kernel/sys.c
+          if ! grep -q "ksu_handle_setresuid" kernel/sys.c; then
+            inject_hook kernel/sys.c "SYSCALL_DEFINE3.setresuid" \
+              "ksu_handle_setresuid(ruid, euid, suid);"
+          fi
+
+          # 6. sys_reboot
+          # signature: int ksu_handle_sys_reboot(int magic1, int magic2,
+          #                                      unsigned int cmd, void __user **arg)
+          add_include kernel/reboot.c
+          if [ -f kernel/reboot.c ] && ! grep -q "ksu_handle_sys_reboot" kernel/reboot.c; then
+            inject_hook kernel/reboot.c "SYSCALL_DEFINE4.reboot" \
+              "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);"
+          fi
+
+          # 7. input_handle_event
+          # signature: int ksu_handle_input_handle_event(unsigned int *type,
+          #                                              unsigned int *code, int *value)
+          # drivers/input/input.c: void input_handle_event(struct input_dev *dev,
+          #                                                 unsigned int type,
+          #                                                 unsigned int code, int value)
+          # local vars: type, code, value → &type, &code, &value
+          add_include drivers/input/input.c
+          if ! grep -q "ksu_handle_input_handle_event" drivers/input/input.c; then
+            inject_hook drivers/input/input.c "void input_handle_event" \
+              "ksu_handle_input_handle_event(&type, &code, &value);"
+            # Fallback kalau static
+            if ! grep -q "ksu_handle_input_handle_event" drivers/input/input.c; then
+              inject_hook drivers/input/input.c "static void input_handle_event" \
+                "ksu_handle_input_handle_event(&type, &code, &value);"
+            fi
+          fi
+
+          echo "== Verifikasi 7 hook wajib =="
+          for f in fs/exec.c fs/open.c fs/stat.c fs/read_write.c kernel/sys.c kernel/reboot.c drivers/input/input.c; do
+            [ -f "$f" ] || continue
+            HOOKS=$(grep -o "ksu_handle_[a-z_]*" "$f" 2>/dev/null | sort -u | tr '\n' ' ')
+            echo "  $f -> ${HOOKS:-NONE}"
+          done
 
       - name: Cleanup and verify SUSFS patch
         run: |
