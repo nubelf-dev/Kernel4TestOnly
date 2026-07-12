@@ -110,6 +110,48 @@ jobs:
         run: |
           git clone --filter=blob:none -b ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_REPO }} kernel
 
+      # ---------- BaikalOS baikalfs cleanup ----------
+      # The generic SUSFS patch conflicts with BaikalOS's baikalfs hooks in a
+      # few files. Remove those hooks first so SUSFS can apply cleanly.
+      - name: Remove baikalfs hooks from conflicting files
+        working-directory: kernel
+        run: |
+          python3 << 'PYEOF'
+          import re
+
+          # fs/stat.c
+          with open('fs/stat.c', 'r') as f:
+              s = f.read()
+          s = re.sub(r'\n#include "baikalfs.h"\n', '\n', s)
+          s = re.sub(
+              r'\tif\( filter_out_path\("vfs_getattr", path\) \) \{\n\t\treturn -ENOENT;\n\t\}\n',
+              '', s)
+          s = s.replace('stat->blksize = i_blocksize(inode);', 'stat->blksize = (1 << inode->i_blkbits);')
+          with open('fs/stat.c', 'w') as f:
+              f.write(s)
+
+          # fs/proc_namespace.c
+          with open('fs/proc_namespace.c', 'r') as f:
+              s = f.read()
+          s = re.sub(r'\n#include "baikalfs.h"\n', '\n', s)
+          for fn in ('show_vfsmnt', 'show_mountinfo', 'show_vfsstat'):
+              s = re.sub(
+                  rf'\tif\( filter_out_mount\("{fn}", mnt, &p->root\) \) \{{\n\t\terr = SEQ_SKIP;\n\t\tgoto out;\n\t\}}\n',
+                  '', s)
+          with open('fs/proc_namespace.c', 'w') as f:
+              f.write(s)
+
+          # fs/proc/task_mmu.c
+          with open('fs/proc/task_mmu.c', 'r') as f:
+              s = f.read()
+          s = re.sub(r'\n#include "../baikalfs.h"\n', '\n', s)
+          s = re.sub(
+              r'''\tif \(file\) \{\n\t\tif\( !filter_out_path_vma\( "show_map_vma", &file->f_path\) \) \{\n\t\t\tseq_pad\(m, ' '\);\n\t\t\tseq_file_path\(m, file, "\\n"\);\n\t\t\tgoto done;\n\t\t\} else \{\n\t\t\tname = "\[naik\]";\n\t\t\tgoto done;\n\t\t\}\n\t\}\n''',
+              '''\tif (file) {\n\t\tseq_pad(m, ' ');\n\t\tseq_file_path(m, file, "\\n");\n\t\tgoto done;\n\t}\n''', s)
+          with open('fs/proc/task_mmu.c', 'w') as f:
+              f.write(s)
+          PYEOF
+
       # ---------- SUSFS patch ----------
       # Apply SUSFS *before* ReSukiSU so a failure can be retried on a clean tree.
       - name: Apply SUSFS 2.2.0 patch
