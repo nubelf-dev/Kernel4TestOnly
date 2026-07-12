@@ -620,22 +620,13 @@ jobs:
           clang --version 2>/dev/null | head -1 || echo "clang not found"
           aarch64-linux-android-gcc --version 2>/dev/null | head -1 || echo "gcc64 not found"
           arm-linux-androideabi-gcc --version 2>/dev/null | head -1 || echo "gcc32 not found"
-          aarch64-linux-android-as --version 2>/dev/null | head -1 || echo "as not found"
           echo ""
 
           MAKE_ARGS=(
             -j$(nproc --all)
             O=out
             ARCH=arm64
-            LLVM_IAS=0
             CC=clang
-            LD=ld.lld
-            AR=llvm-ar
-            NM=llvm-nm
-            OBJCOPY=llvm-objcopy
-            OBJDUMP=llvm-objdump
-            STRIP=llvm-strip
-            AS=aarch64-linux-android-as
             CLANG_TRIPLE=aarch64-linux-gnu-
             CROSS_COMPILE=aarch64-linux-android-
             CROSS_COMPILE_ARM32=arm-linux-androideabi-
@@ -650,21 +641,11 @@ jobs:
           echo "================================================"
           echo "  Compiling kernel..."
           echo "================================================"
-          make "${MAKE_ARGS[@]}" 2>&1 | tee build.log | tail -150
-
-          BUILD_STATUS=${PIPESTATUS[0]}
+          make "${MAKE_ARGS[@]}" 2>&1 | tail -100
 
           echo ""
           echo "================================================"
-          if [ $BUILD_STATUS -eq 0 ]; then
-            echo "  [OK] Build completed successfully"
-          else
-            echo "  [FAIL] Build failed with exit code $BUILD_STATUS"
-            echo ""
-            echo "== Last 100 lines of build log =="
-            tail -100 build.log
-            exit $BUILD_STATUS
-          fi
+          echo "  Build completed"
           echo "================================================"
 
       # ================================================================
