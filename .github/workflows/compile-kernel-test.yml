@@ -47,7 +47,7 @@ env:
   # Kalau kamu sudah punya mirror clang-r487747c.tar.gz sendiri (rilis GitHub / storage lain),
   # isi lewat repo variable CLANG_URL supaya tidak perlu clone AOSP yang berat.
   # Contoh: https://github.com/<user>/clang-prebuilts/releases/download/r487747c/clang-r487747c.tar.gz
-  CLANG_URL: https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz
+  CLANG_URL: ${{ vars.CLANG_URL || 'https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz' }}
   GCC64_URL: ${{ vars.GCC64_URL }}
   GCC32_URL: ${{ vars.GCC32_URL }}
 
@@ -202,65 +202,90 @@ jobs:
 
       # -----------------------------------------------------------------
       # 6. Terapkan patch SUSFS 2.2.0 + fallback kalau gagal patch
+      #
+      # PENTING: susfs_patch_to_4.9.patch SUDAH membuat sendiri file baru
+      # fs/susfs.c, include/linux/susfs.h, include/linux/susfs_def.h lewat
+      # hunk "/dev/null -> file baru". JANGAN copy manual file-file itu dari
+      # susfs4ksu sebelum apply patch, karena git apply akan menolak dengan
+      # error "already exists in working directory". Kalau suatu saat kamu
+      # ganti ke patch versi lain yang TIDAK menyertakan file-file itu,
+      # baru copy manual dari susfs4ksu/kernel_patches/ diperlukan lagi.
       # -----------------------------------------------------------------
-      - name: Ambil source SUSFS (fs/ & include/)
-        run: |
-          set -e
-          git clone --depth=1 -b "${{ inputs.susfs_branch }}" "$SUSFS_REPO" susfs4ksu
-          cp -v susfs4ksu/kernel_patches/fs/*.c "$KERNEL_DIR/fs/" 2>/dev/null || true
-          cp -v susfs4ksu/kernel_patches/include/linux/*.h "$KERNEL_DIR/include/linux/" 2>/dev/null || true
-
       - name: Download patch SUSFS untuk kernel 4.9
         run: |
           curl -LSs -o susfs_patch_to_4.9.patch "$SUSFS_PATCH_URL"
+          # Normalisasi line-ending, jaga-jaga kalau raw.githubusercontent
+          # sempat mengubah CRLF/BOM.
+          sed -i 's/\r$//' susfs_patch_to_4.9.patch
 
-      - name: Terapkan patch SUSFS (dengan fallback jika gagal)
+      - name: Terapkan patch SUSFS (dengan fallback bertingkat)
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           set +e
-          echo "==> Percobaan 1: git apply (strict)"
-          git apply --check ../susfs_patch_to_4.9.patch 2>err1.log
+          PATCH_FILE=../susfs_patch_to_4.9.patch
+
+          echo "==> Percobaan 1: git apply (strict, ignore-whitespace)"
+          git apply --check --ignore-whitespace --ignore-space-change "$PATCH_FILE" 2>err1.log
           if [ $? -eq 0 ]; then
-            git apply ../susfs_patch_to_4.9.patch
+            git apply --ignore-whitespace --ignore-space-change "$PATCH_FILE"
             echo "Patch berhasil diterapkan (strict)."
             exit 0
           fi
           cat err1.log
 
           echo "==> Percobaan 2: git apply dengan 3-way merge"
-          git apply -3 ../susfs_patch_to_4.9.patch 2>err2.log
+          git apply -3 --ignore-whitespace --ignore-space-change "$PATCH_FILE" 2>err2.log
           if [ $? -eq 0 ]; then
             echo "Patch berhasil diterapkan (3-way merge)."
             exit 0
           fi
           cat err2.log
 
-          echo "==> Percobaan 3: patch klasik dengan fuzz, izinkan reject file"
-          patch -p1 --fuzz=3 --no-backup-if-mismatch < ../susfs_patch_to_4.9.patch > patch3.log 2>&1
-          RESULT=$?
+          echo "==> Percobaan 3: patch klasik, fuzz tinggi + abaikan whitespace"
+          patch -p1 --fuzz=5 --ignore-whitespace -l --no-backup-if-mismatch < "$PATCH_FILE" > patch3.log 2>&1
+          RESULT3=$?
           cat patch3.log
-
           REJECTS=$(find . -name "*.rej" 2>/dev/null)
+          if [ $RESULT3 -eq 0 ] && [ -z "$REJECTS" ]; then
+            echo "Patch berhasil diterapkan (fuzzy, tanpa reject)."
+            exit 0
+          fi
+
+          echo "==> Percobaan 4: patch --merge (sisipkan conflict marker <<<<<<< di file yang gagal)"
+          echo "    supaya sisa hunk yang gagal bisa diperbaiki LANGSUNG di file, bukan lewat .rej terpisah."
+          find . -name "*.rej" -delete
+          find . -name "*.orig" -delete
+          patch -p1 --fuzz=5 --ignore-whitespace -l --merge < "$PATCH_FILE" > patch4.log 2>&1
+          cat patch4.log
+
+          CONFLICTS=$(grep -rl "^<<<<<<<" --include="*.c" --include="*.h" --include="Makefile" . 2>/dev/null)
+          REJECTS=$(find . -name "*.rej" 2>/dev/null)
+
+          if [ -z "$CONFLICTS" ] && [ -z "$REJECTS" ]; then
+            echo "Patch berhasil diterapkan sepenuhnya lewat mode merge."
+            exit 0
+          fi
+
+          echo "::warning::Sebagian hunk GAGAL diterapkan otomatis."
+          if [ -n "$CONFLICTS" ]; then
+            echo "::warning::File dengan conflict marker (<<<<<<<), perbaiki manual lalu hapus markernya:"
+            for f in $CONFLICTS; do
+              echo "  - $f"
+            done
+          fi
           if [ -n "$REJECTS" ]; then
-            echo "::warning::Sebagian hunk GAGAL diterapkan otomatis, cek file .rej berikut:"
-            echo "$REJECTS"
+            echo "::warning::File .rej (hunk tidak bisa ditempatkan sama sekali):"
             for f in $REJECTS; do
               echo "----- $f -----"
               cat "$f"
             done
-            echo "::error::Patch SUSFS tidak sepenuhnya berhasil. Perbaiki manual hunk di atas,"
-            echo "::error::commit hasil perbaikannya ke fork kernel kamu, lalu jalankan ulang workflow ini."
-            echo "::error::(Fuzz/3-way sudah dicoba otomatis; sisanya butuh review manual"
-            echo "::error:: karena source kernel BaikalOS bisa saja sudah berbeda dari basis patch.)"
-            exit 1
           fi
-
-          if [ $RESULT -ne 0 ]; then
-            echo "::error::Patch gagal total tanpa reject file yang jelas. Cek patch3.log di atas."
-            exit 1
-          fi
-
-          echo "Patch berhasil diterapkan (fuzzy, tanpa reject)."
+          echo "::error::Patch SUSFS tidak sepenuhnya berhasil (source BaikalOS kemungkinan"
+          echo "::error::sudah berbeda dari basis patch di titik-titik di atas)."
+          echo "::error::Perbaiki manual file-file tsb di fork kernel kamu, commit, lalu"
+          echo "::error::jalankan ulang workflow ini. Semua percobaan otomatis (strict/3-way/"
+          echo "::error::fuzzy/merge, sudah dengan ignore-whitespace) sudah dicoba lebih dulu."
+          exit 1
 
       # -----------------------------------------------------------------
       # 7. Aktifkan opsi KernelSU + SUSFS di defconfig
