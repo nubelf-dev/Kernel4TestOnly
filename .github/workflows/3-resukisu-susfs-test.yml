@@ -46,7 +46,7 @@ on:
       clang_url:
         description: 'Clang prebuilt'
         required: false
-        default: 'https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz'
+        default: 'https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r487747c.tar.gz'
 
 env:
   KBUILD_BUILD_USER: "Nerf."
@@ -122,6 +122,26 @@ jobs:
           if [ ! -d .resukisu-src ]; then
             git clone --depth=1 -b "${{ github.event.inputs.resukisu_branch }}" \
               "${{ github.event.inputs.resukisu_repo }}" .resukisu-src
+          fi
+
+      - name: "7b. DIAGNOSTIK: Dump Kconfig asli ReSukiSU (verifikasi nama config, bukan tebakan)"
+        run: |
+          cd kernel-src
+          KSU_DIR=$(ls -d KernelSU KernelSU-Next ReSukiSU 2>/dev/null | head -1)
+          echo "Folder KSU terdeteksi: ${KSU_DIR:-TIDAK DITEMUKAN}"
+          if [ -n "$KSU_DIR" ] && [ -f "$KSU_DIR/kernel/Kconfig" ]; then
+            echo "=================================================="
+            echo "Isi lengkap $KSU_DIR/kernel/Kconfig"
+            echo "=================================================="
+            cat "$KSU_DIR/kernel/Kconfig"
+            echo ""
+            echo "== Semua opsi 'config XXX' yang benar-benar terdefinisi =="
+            grep -oE '^config [A-Z0-9_]+' "$KSU_DIR/kernel/Kconfig" | sort -u
+            echo ""
+            echo "== Cek keberadaan choice{} block (potensi konflik seperti kasus ReSukiSU/KSU_SUSFS sebelumnya) =="
+            grep -n -B2 -A15 "^choice" "$KSU_DIR/kernel/Kconfig" || echo "Tidak ada choice block."
+          else
+            echo "[PERINGATAN] Tidak menemukan kernel/Kconfig di folder KSU manapun!"
           fi
 
       # ============================================================
@@ -216,6 +236,17 @@ jobs:
         run: |
           cd kernel-src
           set -e
+
+          # PERINGATAN PENTING (berdasarkan temuan sebelumnya di percobaan KSU-Next
+          # ThRE-Team v3.3.0-enjoy): repo simonpunk/susfs4ksu resmi baru sampai versi
+          # 1.5.5 (API "klasik": CONFIG_KSU_SUSFS_* + fungsi susfs_xxx() langsung).
+          # Sementara itu, "SUSFS v2.2.0" yang disebut beberapa fork (termasuk ThRE-Team)
+          # TERBUKTI memakai arsitektur BERBEDA (command dispatcher "supercall" dengan
+          # SUSFS_MAGIC, CMD_SUSFS_* dkk) yang TIDAK ADA di source simonpunk manapun.
+          # Jika ReSukiSU JUGA memakai arsitektur supercall itu (belum terverifikasi),
+          # source simonpunk di bawah ini TIDAK AKAN cocok, dan akan muncul error
+          # seperti "use of undeclared identifier 'SUSFS_MAGIC'" -- itu bukan bug baru,
+          # itu konfirmasi version mismatch yang sama seperti kasus KSU-Next kemarin.
           git clone --depth=1 -b "${{ github.event.inputs.susfs_branch }}" \
             "${{ github.event.inputs.susfs_repo }}" .susfs4ksu
           curl -LSsf "${{ github.event.inputs.susfs_patch_url }}" -o /tmp/susfs.patch
@@ -467,17 +498,29 @@ jobs:
           DEFCONFIG_PATH="arch/arm64/configs/${{ github.event.inputs.defconfig }}"
 
           if [ "${{ github.event.inputs.use_extracted_config }}" = "true" ]; then
-            EXTRACTED_CFG="$GITHUB_WORKSPACE/extracted-config/bos13_defconfig"
+            EXTRACTED_CFG="$GITHUB_WORKSPACE/extracted-config/my_defconfig.txt"
             [ -f "$EXTRACTED_CFG" ] && cp "$EXTRACTED_CFG" "$DEFCONFIG_PATH"
           fi
 
-          sed -i '/^CONFIG_KSU/d;/^# CONFIG_KSU is not set/d;/SUSFS/d;/^CONFIG_KSU_KPROBE_HOOKS/d' "$DEFCONFIG_PATH"
+          sed -i '/^CONFIG_KSU/d;/^# CONFIG_KSU is not set/d;/SUSFS/d;/^CONFIG_KSU_KPROBE_HOOKS/d;/^CONFIG_KSU_MANUAL_HOOK/d' "$DEFCONFIG_PATH"
 
           {
             echo ""
             echo "CONFIG_KSU=y"
+            # PENTING: CONFIG_KPROBES=y dipertahankan sebagai baseline arsitektur --
+            # berdasarkan Kconfig resmi (baik ThRE-Team/KernelSU-Next maupun kemungkinan
+            # besar ReSukiSU juga), baris "Requires CONFIG_KPROBES for kernel hooking
+            # support" muncul di level top config KSU itu sendiri, terlepas dari hook
+            # mode yang dipilih (manual vs kprobes). Ini BUKAN yang menentukan mode hook.
             echo "CONFIG_KPROBES=y"
             echo "CONFIG_KPROBE_EVENTS=y"
+            # KRITIKAL: sebelumnya TIDAK ADA baris ini -- padahal step 8-11 di workflow
+            # ini bersusah payah menyuntik hook manual (ksu_handle_execveat dkk) ke
+            # source kernel. Tanpa config ini di-set eksplisit, olddefconfig bisa
+            # memilih default lain (kprobes), membuat hook manual yang sudah disuntik
+            # tidak pernah aktif/dipakai. Nama config ini sudah diverifikasi langsung
+            # dari dokumentasi resmi: https://resukisu.github.io/guide/manual-integrate.html
+            echo "CONFIG_KSU_MANUAL_HOOK=y"
             echo "CONFIG_KSU_SUSFS=y"
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
             echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
@@ -489,9 +532,6 @@ jobs:
             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
             echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
-            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
-            echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y"
-            echo "CONFIG_KSU_SUSFS_SUS_SU=y"
             echo "CONFIG_OVERLAY_FS=y"
             echo "CONFIG_TMPFS_XATTR=y"
             echo "CONFIG_TMPFS_POSIX_ACL=y"
