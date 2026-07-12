@@ -27,9 +27,9 @@ env:
   KBUILD_BUILD_HOST: "OldlineSSS"
   CLANG_VERSION: clang-r487747c
   CLANG_URL: "https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz"
-  GCC64_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
-  GCC32_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
-  GCC_BRANCH: android-9.0.0_r61
+  # GCC64_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
+  # GCC32_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
+  # GCC_BRANCH: android-9.0.0_r61
   RESUKISU_REPO: https://github.com/ReSukiSU/ReSukiSU
 
 jobs:
@@ -69,7 +69,9 @@ jobs:
             squashfs-tools xsltproc zip zlib1g-dev \
             python3 python-is-python3 cpio kmod \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            ca-certificates
+            gcc-arm-linux-gnueabi g++-arm-linux-gnueabi \
+            ca-certificates clang lld llvm
+            
       # ================================================================
       # 3. Cache Clang toolchain
       # ================================================================
@@ -94,35 +96,35 @@ jobs:
       # ================================================================
       # 4. Cache GCC toolchains
       # ================================================================
-      - name: "Cache GCC64 aarch64"
-        id: cache-gcc64
-        uses: actions/cache@v4
-        with:
-          path: toolchain/gcc64
-          key: gcc64-aarch64-4.9-${{ env.GCC_BRANCH }}-v1
+      # - name: "Cache GCC64 aarch64"
+      #  id: cache-gcc64
+      #  uses: actions/cache@v4
+      #  with:
+      #    path: toolchain/gcc64
+      #    key: gcc64-aarch64-4.9-${{ env.GCC_BRANCH }}-v1
 
-      - name: "Download GCC64 if cache miss"
-        if: steps.cache-gcc64.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p toolchain/gcc64
-          git clone --depth=1 -b ${{ env.GCC_BRANCH }} \
-            ${{ env.GCC64_REPO }} toolchain/gcc64
-          echo "[OK] GCC64 downloaded"
+      #- name: "Download GCC64 if cache miss"
+      #  if: steps.cache-gcc64.outputs.cache-hit != 'true'
+      #  run: |
+      #    mkdir -p toolchain/gcc64
+      #   git clone --depth=1 -b ${{ env.GCC_BRANCH }} \
+      #      ${{ env.GCC64_REPO }} toolchain/gcc64
+      #    echo "[OK] GCC64 downloaded"
 
-      - name: "Cache GCC32 arm"
-        id: cache-gcc32
-        uses: actions/cache@v4
-        with:
-          path: toolchain/gcc32
-          key: gcc32-arm-4.9-${{ env.GCC_BRANCH }}-v1
+      #- name: "Cache GCC32 arm"
+      #  id: cache-gcc32
+      #  uses: actions/cache@v4
+      #  with:
+      #    path: toolchain/gcc32
+      #    key: gcc32-arm-4.9-${{ env.GCC_BRANCH }}-v1
 
-      - name: "Download GCC32 if cache miss"
-        if: steps.cache-gcc32.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p toolchain/gcc32
-          git clone --depth=1 -b ${{ env.GCC_BRANCH }} \
-            ${{ env.GCC32_REPO }} toolchain/gcc32
-          echo "[OK] GCC32 downloaded"
+      #- name: "Download GCC32 if cache miss"
+      #  if: steps.cache-gcc32.outputs.cache-hit != 'true'
+      #  run: |
+      #    mkdir -p toolchain/gcc32
+      #    git clone --depth=1 -b ${{ env.GCC_BRANCH }} \
+      #      ${{ env.GCC32_REPO }} toolchain/gcc32
+      #    echo "[OK] GCC32 downloaded"
 
       # ================================================================
       # 5. Clone kernel source
@@ -691,11 +693,13 @@ jobs:
         run: |
           # Path absolut toolchain
           CLANG_DIR="$GITHUB_WORKSPACE/toolchain/clang"
-          GCC64_DIR="$GITHUB_WORKSPACE/toolchain/gcc64"
-          GCC32_DIR="$GITHUB_WORKSPACE/toolchain/gcc32"
+          # GCC64_DIR="$GITHUB_WORKSPACE/toolchain/gcc64"
+          # GCC32_DIR="$GITHUB_WORKSPACE/toolchain/gcc32"
 
           # Setup PATH
-          export PATH="${CLANG_DIR}/bin:${GCC64_DIR}/bin:${GCC32_DIR}/bin:${PATH}"
+          # export PATH="${CLANG_DIR}/bin:${GCC64_DIR}/bin:${GCC32_DIR}/bin:${PATH}"
+          # Hanya butuh Clang
+          export PATH="${CLANG_DIR}/bin:${PATH}"
           
           # Konfigurasi Env
           export ARCH=arm64
@@ -725,18 +729,27 @@ jobs:
           fi
 
           # Izin eksekusi
-          chmod -R +x ${CLANG_DIR}/bin ${GCC64_DIR}/bin ${GCC32_DIR}/bin
+          # chmod -R +x ${CLANG_DIR}/bin ${GCC64_DIR}/bin ${GCC32_DIR}/bin
+          chmod -R +x ${CLANG_DIR}/bin
 
           # Argumen Build
           MAKE_ARGS=(
             -j$(nproc --all)
             O=out
             ARCH=arm64
-            CC="ccache clang"
+            CC="ccache clang"          # Menggunakan ccache untuk mempercepat build
+            LD=ld.lld                  # Linker LLVM
+            AR=llvm-ar                 # Archiver LLVM
+            NM=llvm-nm                 # NM LLVM
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            READELF=llvm-readelf
             CLANG_TRIPLE=aarch64-linux-gnu-
-            CROSS_COMPILE=aarch64-linux-android-
-            CROSS_COMPILE_ARM32=arm-linux-androideabi-
-            LLVM_IAS=0
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            LLVM=1
+            LLVM_IAS=1
           )
 
           # Eksekusi
