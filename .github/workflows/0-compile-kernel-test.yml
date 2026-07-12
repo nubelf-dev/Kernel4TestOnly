@@ -1,0 +1,98 @@
+name: 0-Compile Kernel Test (BaikalOS + ResuKisu + SUSFS)
+
+on:
+  workflow_dispatch:
+
+env:
+  KERNEL_SOURCE: https://github.com/baikalos/android_kernel_xiaomi_sdm845
+  # Sesuaikan dengan branch yang tepat (misal: baikal-13.0 atau lineagoes-20, dsb)
+  KERNEL_BRANCH: baikal-13.0 
+  DEFCONFIG_NAME: bos13_defconfig
+  ARCH: arm64
+  # URL Script ResuKisu. Harap pastikan URL ini sesuai dengan fork ResuKisu Anda!
+  RESUKISU_SETUP_URL: https://raw.githubusercontent.com/WildPlus/ResuKisu/main/kernel/setup.sh
+  # Raw URL Patch SUSFS 2.2.0 untuk kernel 4.9
+  SUSFS_PATCH_URL: https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.9.patch
+
+jobs:
+  build:
+    name: Build Kernel SDM845
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout Your Repository
+      uses: actions/checkout@v4
+      with:
+        path: manifest_repo
+
+    - name: Setup Build Environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git ccache automake flex lzop bison \
+          gperf build-essential zip curl zlib1g-dev g++-multilib \
+          libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev \
+          squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool \
+          make optipng maven libssl-dev pwgen libswitch-perl \
+          policycoreutils minicom libxml-sax-base-perl libxml-simple-perl \
+          bc libc6-dev-i386 lib32ncurses5-dev libx11-dev \
+          lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler \
+          python2 python3
+
+    - name: Clone Toolchain (Proton Clang)
+      run: |
+        # Menggunakan Proton Clang karena terkenal stabil untuk kernel 4.9 Android
+        git clone --depth=1 https://github.com/kdrag0n/proton-clang toolchain
+
+    - name: Clone Kernel Source
+      run: |
+        git clone --depth=1 $KERNEL_SOURCE -b $KERNEL_BRANCH kernel_workspace || git clone --depth=1 $KERNEL_SOURCE kernel_workspace
+
+    - name: Integrate ResuKisu
+      working-directory: kernel_workspace
+      run: |
+        echo "Mengunduh dan menjalankan setup script ResuKisu..."
+        curl -LSs "$RESUKISU_SETUP_URL" | bash - || echo "Gagal mengunduh script ResuKisu. Cek URL Anda!"
+
+    - name: Integrate SUSFS 2.2.0
+      working-directory: kernel_workspace
+      run: |
+        echo "Mengunduh patch SUSFS..."
+        wget $SUSFS_PATCH_URL -O susfs.patch
+        
+        echo "Menerapkan patch SUSFS..."
+        # Menggunakan patch -p1.
+        patch -p1 < susfs.patch || echo "Peringatan: Ada file yang gagal di-patch secara otomatis (Hunk failed)."
+
+    - name: Copy Extracted Defconfig
+      run: |
+        echo "Menyalin $DEFCONFIG_NAME dari repo Anda ke arch/arm64/configs/"
+        cp manifest_repo/extracted-config/$DEFCONFIG_NAME kernel_workspace/arch/arm64/configs/$DEFCONFIG_NAME
+
+    - name: Compile Kernel
+      working-directory: kernel_workspace
+      run: |
+        export PATH=$GITHUB_WORKSPACE/toolchain/bin:$PATH
+        export KBUILD_BUILD_USER="Nubelf"
+        export KBUILD_BUILD_HOST="Github-Actions"
+        
+        # Build Setup
+        make O=out ARCH=$ARCH $DEFCONFIG_NAME
+        
+        # Mulai Kompilasi
+        make -j$(nproc --all) O=out ARCH=$ARCH \
+             CC=clang \
+             CROSS_COMPILE=aarch64-linux-gnu- \
+             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+             AR=llvm-ar \
+             NM=llvm-nm \
+             OBJCOPY=llvm-objcopy \
+             OBJDUMP=llvm-objdump \
+             STRIP=llvm-strip \
+             Image.gz-dtb
+
+    - name: Upload Kernel Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-Image.gz-dtb
+        path: kernel_workspace/out/arch/arm64/boot/Image.gz-dtb
+        retention-days: 7
