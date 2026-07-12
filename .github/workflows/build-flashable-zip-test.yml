@@ -1,0 +1,110 @@
+name: Build Flashable Zip (AnyKernel3)
+
+on:
+  workflow_call:
+    inputs:
+      artifact_name:
+        description: "Nama artifact hasil compile-kernel-test.yml yang berisi Image.gz-dtb/dtbo.img"
+        required: false
+        type: string
+        default: kernel-image
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run ID dari compile-kernel-test.yml yang mau dipaketkan ulang (kosongkan = run ini sendiri)"
+        required: false
+        default: ""
+      artifact_name:
+        description: "Nama artifact yang berisi Image.gz-dtb/dtbo.img"
+        required: false
+        default: kernel-image
+
+env:
+  # Ganti ke fork AnyKernel3 milikmu sendiri yang sudah dikonfigurasi untuk sdm845/BaikalOS.
+  # Kalau kosong, workflow akan pakai template umum osm0sis/AnyKernel3 (WAJIB sesuaikan anykernel.sh!).
+  ANYKERNEL_REPO: ${{ vars.ANYKERNEL_REPO || 'https://github.com/nubelf-dev/AnyKernel4TestOnly' }}
+  ANYKERNEL_BRANCH: ${{ vars.ANYKERNEL_BRANCH || 'master' }}
+  ZIP_NAME_PREFIX: BaikalOS-A13-F1-ReSukiSU-SUSFS
+
+jobs:
+  package:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout build repo
+        uses: actions/checkout@v4
+
+      - name: Download hasil compile (workflow_call, artifact dari job sebelumnya)
+        if: ${{ github.event_name == 'workflow_call' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: image
+
+      - name: Download hasil compile (manual dispatch, dari run lain)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: image
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download hasil compile (manual dispatch, run ini sendiri)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_id == '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: image
+
+      - name: Cek isi artifact
+        run: |
+          echo "Isi folder image/:"
+          find image -type f
+          if ! find image -type f -name "Image*" | grep -q .; then
+            echo "::error::Tidak ada file Image/Image.gz-dtb di artifact. Cek job compile."
+            exit 1
+          fi
+
+      - name: Clone template AnyKernel3
+        run: |
+          git clone --depth=1 -b "$ANYKERNEL_BRANCH" "$ANYKERNEL_REPO" anykernel
+
+      - name: Susun isi zip flashable
+        run: |
+          set -e
+          cd anykernel
+
+          # Bersihkan kernel image bawaan template kalau ada
+          rm -f Image Image.gz Image.gz-dtb zImage dtbo.img .git .github modules patch ramdisk LICENSE README.md
+
+          if [ -f ../image/Image.gz-dtb ]; then
+            cp ../image/Image.gz-dtb ./Image.gz-dtb
+          elif [ -f ../image/Image ]; then
+            cp ../image/Image ./Image
+          fi
+
+          if [ -f ../image/dtbo.img ]; then
+            cp ../image/dtbo.img ./dtbo.img
+          fi
+
+          echo "----------------------------------------------------------------"
+          echo "PENTING: sesuaikan anykernel.sh (block/partition, device.name*,"
+          echo "is_slot_device, dll) dengan target device sdm845 BaikalOS kamu"
+          echo "kalau memakai template AnyKernel3 generik."
+          echo "----------------------------------------------------------------"
+
+      - name: Tentukan nama zip
+        run: |
+          DATE=$(date +'%Y%m%d-%H%M')
+          echo "ZIP_FILENAME=${ZIP_NAME_PREFIX}-${DATE}.zip" >> "$GITHUB_ENV"
+
+      - name: Buat zip flashable
+        working-directory: anykernel
+        run: |
+          zip -r9 "../${{ env.ZIP_FILENAME }}" . -x ".git*" -x "README.md"
+
+      - name: Upload flashable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: flashable-zip
+          path: ${{ env.ZIP_FILENAME }}
