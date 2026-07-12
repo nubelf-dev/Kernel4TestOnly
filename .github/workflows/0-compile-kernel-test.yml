@@ -18,7 +18,7 @@ jobs:
       KBUILD_BUILD_USER: "Nerf."
       KBUILD_BUILD_HOST: "OldlineSSS"
       CLANG_VERSION: clang-r487747c
-      CLANG_ARCHIVE_URL_MAIN: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz
+      CLANG_ARCHIVE_URL_MAIN: https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz
       CLANG_ARCHIVE_URL_MASTER: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r487747c.tar.gz
       GCC64_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
       GCC32_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
