@@ -174,7 +174,11 @@ jobs:
               patch -p1 --fuzz=3 --no-backup-if-mismatch < /tmp/susfs.patch || true
               if find . -type f \( -name "*.rej" -o -name "*.orig" \) | grep -q .; then
                 echo "::error::SUSFS patch has unresolved rejects. Inspect the files below:"
-                find . -type f \( -name "*.rej" -o -name "*.orig" \)
+                for f in $(find . -type f \( -name "*.rej" -o -name "*.orig" \)); do
+                  echo "===== $f ====="
+                  cat "$f"
+                  echo "===== end $f ====="
+                done
                 exit 1
               fi
               echo "SUSFS patch applied with fuzz."
