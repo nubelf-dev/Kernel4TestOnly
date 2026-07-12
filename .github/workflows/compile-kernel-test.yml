@@ -1,7 +1,6 @@
 ###############################################################################
 #  compile-kernel-test.yml
-#  --------------------------------------------------------------------------
-#  Compile BaikalOS 13.0 kernel 4.9.337 (sdm845) + ReSukiSU + SUSFS 2.2.0
+#  Compile BaikalOS 13.0 kernel 4.9.337 sdm845 + ReSukiSU + SUSFS 2.2.0
 ###############################################################################
 
 name: Compile Kernel (Test)
@@ -22,18 +21,14 @@ env:
   KERNEL_REPO: https://github.com/baikalos/android_kernel_xiaomi_sdm845
   KERNEL_BRANCH: "13.0"
   KERNEL_DIR: android_kernel_xiaomi_sdm845
-
   DEFCONFIG_NAME: bos13_defconfig
-
   KBUILD_BUILD_USER: "Nerf."
   KBUILD_BUILD_HOST: "OldlineSSS"
-
   CLANG_VERSION: clang-r487747c
   CLANG_URL: "https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz"
   GCC64_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
   GCC32_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
   GCC_BRANCH: android-13.0.0_r1
-
   RESUKISU_REPO: https://github.com/ReSukiSU/ReSukiSU
 
 jobs:
@@ -67,7 +62,7 @@ jobs:
           path: toolchain/clang
           key: clang-${{ env.CLANG_VERSION }}-v1
 
-      - name: "Download Clang (if cache miss)"
+      - name: "Download Clang if cache miss"
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
           mkdir -p toolchain/clang
@@ -78,28 +73,28 @@ jobs:
           echo "[OK] Clang downloaded"
           toolchain/clang/bin/clang --version || true
 
-      - name: "Cache GCC64 (aarch64-linux-android-4.9)"
+      - name: "Cache GCC64 aarch64"
         id: cache-gcc64
         uses: actions/cache@v4
         with:
           path: toolchain/gcc64
           key: gcc64-aarch64-4.9-${{ env.GCC_BRANCH }}-v1
 
-      - name: "Download GCC64 (if cache miss)"
+      - name: "Download GCC64 if cache miss"
         if: steps.cache-gcc64.outputs.cache-hit != 'true'
         run: |
           git clone --depth=1 -b ${{ env.GCC_BRANCH }} \
             ${{ env.GCC64_REPO }} toolchain/gcc64
           echo "[OK] GCC64 downloaded"
 
-      - name: "Cache GCC32 (arm-linux-androideabi-4.9)"
+      - name: "Cache GCC32 arm"
         id: cache-gcc32
         uses: actions/cache@v4
         with:
           path: toolchain/gcc32
           key: gcc32-arm-4.9-${{ env.GCC_BRANCH }}-v1
 
-      - name: "Download GCC32 (if cache miss)"
+      - name: "Download GCC32 if cache miss"
         if: steps.cache-gcc32.outputs.cache-hit != 'true'
         run: |
           git clone --depth=1 -b ${{ env.GCC_BRANCH }} \
@@ -130,7 +125,7 @@ jobs:
           echo "[INFO] Downloading SUSFS patch..."
           curl -fsSL "$SUSFS_PATCH_URL" -o susfs_patch_to_4.9.patch
 
-          echo "[INFO] Applying SUSFS patch (allowing partial failures)..."
+          echo "[INFO] Applying SUSFS patch..."
           git apply --reject --whitespace=fix susfs_patch_to_4.9.patch || true
 
           echo ""
@@ -139,8 +134,6 @@ jobs:
           if [ -n "$REJECTS" ]; then
             echo "[WARN] Found reject files:"
             echo "$REJECTS"
-            echo ""
-            echo "[NOTE] Contents of reject files:"
             for rej in $REJECTS; do
               echo "================================================"
               echo "[FILE] $rej"
@@ -149,10 +142,10 @@ jobs:
               echo ""
             done
           else
-            echo "[OK] No reject files - patch applied cleanly"
+            echo "[OK] No reject files"
           fi
 
-      - name: "Manual fix fs/stat.c SUSFS sus_kstat"
+      - name: "Manual fix fs stat c SUSFS sus_kstat"
         run: |
           cd ${{ env.KERNEL_DIR }}
           FILE="fs/stat.c"
@@ -165,90 +158,90 @@ jobs:
           echo "[FIX] Applying manual fix for ${FILE}..."
 
           python3 <<'PYEOF'
-import re
+          import re
 
-with open("fs/stat.c", "r") as f:
-    content = f.read()
+          with open("fs/stat.c", "r") as f:
+              content = f.read()
 
-# Fix 1: add SUSFS include after baikalfs.h include
-if '#include <linux/susfs.h>' not in content:
-    if '#include "baikalfs.h"' in content:
-        content = content.replace(
-            '#include "baikalfs.h"',
-            '#include "baikalfs.h"\n'
-            '#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n'
-            '#include <linux/susfs.h>\n'
-            '#endif'
-        )
-        print("  [OK] Added SUSFS include")
+          if '#include <linux/susfs.h>' not in content:
+              if '#include "baikalfs.h"' in content:
+                  content = content.replace(
+                      '#include "baikalfs.h"',
+                      '#include "baikalfs.h"\n'
+                      '#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n'
+                      '#include <linux/susfs.h>\n'
+                      '#endif'
+                  )
+                  print("  [OK] Added SUSFS include")
 
-# Fix 2: add susfs_sus_kstat() call
-if 'susfs_sus_kstat' not in content:
-    old_block = """int vfs_getattr_nosec(struct path *path, struct kstat *stat)
-{
-\tstruct inode *inode = d_backing_inode(path->dentry);
+          if 'susfs_sus_kstat' not in content:
+              old_block = (
+                  "int vfs_getattr_nosec(struct path *path, struct kstat *stat)\n"
+                  "{\n"
+                  "\tstruct inode *inode = d_backing_inode(path->dentry);\n"
+                  "\n"
+                  "\tif (inode->i_op->getattr)\n"
+                  "\t\treturn inode->i_op->getattr(path->mnt, path->dentry, stat);\n"
+                  "\n"
+                  "\tgeneric_fillattr(inode, stat);\n"
+                  "\treturn 0;\n"
+                  "}"
+              )
+              new_block = (
+                  "int vfs_getattr_nosec(struct path *path, struct kstat *stat)\n"
+                  "{\n"
+                  "\tstruct inode *inode = d_backing_inode(path->dentry);\n"
+                  "\n"
+                  "\tif (inode->i_op->getattr)\n"
+                  "\t\treturn inode->i_op->getattr(path->mnt, path->dentry, stat);\n"
+                  "\n"
+                  "\tgeneric_fillattr(inode, stat);\n"
+                  "#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n"
+                  "\tsusfs_sus_kstat(inode, stat);\n"
+                  "#endif\n"
+                  "\treturn 0;\n"
+                  "}"
+              )
+              if old_block in content:
+                  content = content.replace(old_block, new_block)
+                  print("  [OK] Added susfs_sus_kstat() to vfs_getattr_nosec")
+              else:
+                  pattern = r'(generic_fillattr\(inode, stat\);)\s*\n(\s*return 0;\s*\n\}\s*\nEXPORT_SYMBOL\(vfs_getattr_nosec\))'
+                  replacement = r'\1' + '\n#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n\tsusfs_sus_kstat(inode, stat);\n#endif\n' + r'\2'
+                  new_content = re.sub(pattern, replacement, content, count=1)
+                  if new_content != content:
+                      content = new_content
+                      print("  [OK] Added susfs_sus_kstat() via regex")
+                  else:
+                      lines = content.split('\n')
+                      new_lines = []
+                      in_func = False
+                      done = False
+                      for line in lines:
+                          if 'vfs_getattr_nosec' in line and 'int ' in line:
+                              in_func = True
+                          if in_func and not done and 'generic_fillattr(inode, stat)' in line:
+                              new_lines.append(line)
+                              new_lines.append('#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT')
+                              new_lines.append('\tsusfs_sus_kstat(inode, stat);')
+                              new_lines.append('#endif')
+                              done = True
+                              continue
+                          new_lines.append(line)
+                      if done:
+                          content = '\n'.join(new_lines)
+                          print("  [OK] Added susfs_sus_kstat() line-by-line")
+                      else:
+                          print("  [FAIL] Could not patch vfs_getattr_nosec")
 
-\tif (inode->i_op->getattr)
-\t\treturn inode->i_op->getattr(path->mnt, path->dentry, stat);
-
-\tgeneric_fillattr(inode, stat);
-\treturn 0;
-}"""
-
-    new_block = """int vfs_getattr_nosec(struct path *path, struct kstat *stat)
-{
-\tstruct inode *inode = d_backing_inode(path->dentry);
-
-\tif (inode->i_op->getattr)
-\t\treturn inode->i_op->getattr(path->mnt, path->dentry, stat);
-
-\tgeneric_fillattr(inode, stat);
-#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
-\tsusfs_sus_kstat(inode, stat);
-#endif
-\treturn 0;
-}"""
-
-    if old_block in content:
-        content = content.replace(old_block, new_block)
-        print("  [OK] Added susfs_sus_kstat() to vfs_getattr_nosec")
-    else:
-        pattern = r'(generic_fillattr\(inode, stat\);)\s*\n(\s*return 0;\s*\n\}\s*\nEXPORT_SYMBOL\(vfs_getattr_nosec\))'
-        replacement = r'\1\n#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n\tsusfs_sus_kstat(inode, stat);\n#endif\n\2'
-        new_content = re.sub(pattern, replacement, content, count=1)
-        if new_content != content:
-            content = new_content
-            print("  [OK] Added susfs_sus_kstat() via regex")
-        else:
-            lines = content.split('\n')
-            new_lines = []
-            in_func = False
-            done = False
-            for line in lines:
-                if 'vfs_getattr_nosec' in line and 'int ' in line:
-                    in_func = True
-                if in_func and not done and 'generic_fillattr(inode, stat)' in line:
-                    new_lines.append(line)
-                    new_lines.append('#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT')
-                    new_lines.append('\tsusfs_sus_kstat(inode, stat);')
-                    new_lines.append('#endif')
-                    done = True
-                    continue
-                new_lines.append(line)
-            if done:
-                content = '\n'.join(new_lines)
-                print("  [OK] Added susfs_sus_kstat() line-by-line")
-            else:
-                print("  [FAIL] Could not patch vfs_getattr_nosec")
-
-with open("fs/stat.c", "w") as f:
-    f.write(content)
-PYEOF
+          with open("fs/stat.c", "w") as f:
+              f.write(content)
+          PYEOF
 
           rm -f "${FILE}.rej"
           echo "[OK] ${FILE} fixed"
 
-      - name: "Manual fix fs/proc_namespace.c SUSFS sus_mount"
+      - name: "Manual fix fs proc_namespace c SUSFS sus_mount"
         run: |
           cd ${{ env.KERNEL_DIR }}
           FILE="fs/proc_namespace.c"
@@ -261,115 +254,115 @@ PYEOF
           echo "[FIX] Applying manual fix for ${FILE}..."
 
           python3 <<'PYEOF'
-import re
+          import re
 
-with open("fs/proc_namespace.c", "r") as f:
-    content = f.read()
+          with open("fs/proc_namespace.c", "r") as f:
+              content = f.read()
 
-changes = 0
+          changes = 0
 
-if '#include <linux/susfs.h>' not in content:
-    if '#include "baikalfs.h"' in content:
-        content = content.replace(
-            '#include "baikalfs.h"',
-            '#include "baikalfs.h"\n'
-            '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-            '#include <linux/susfs.h>\n'
-            '#endif'
-        )
-    else:
-        content = content.replace(
-            '#include "internal.h"',
-            '#include "internal.h"\n'
-            '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-            '#include <linux/susfs.h>\n'
-            '#endif'
-        )
-    changes += 1
-    print("  [OK] Added SUSFS include")
+          if '#include <linux/susfs.h>' not in content:
+              if '#include "baikalfs.h"' in content:
+                  content = content.replace(
+                      '#include "baikalfs.h"',
+                      '#include "baikalfs.h"\n'
+                      '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                      '#include <linux/susfs.h>\n'
+                      '#endif'
+                  )
+              else:
+                  content = content.replace(
+                      '#include "internal.h"',
+                      '#include "internal.h"\n'
+                      '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                      '#include <linux/susfs.h>\n'
+                      '#endif'
+                  )
+              changes += 1
+              print("  [OK] Added SUSFS include")
 
-if 'susfs_is_sus_mount' not in content:
-    insert_point = '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs.h>\n#endif'
-    if insert_point in content:
-        content = content.replace(
-            insert_point,
-            insert_point + '\n\n'
-            '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-            'extern bool susfs_is_sus_mount(struct vfsmount *mnt);\n'
-            'extern int susfs_get_non_sus_mnt_id_from_mnt(struct mount *mnt);\n'
-            '#endif'
-        )
-    changes += 1
-    print("  [OK] Added SUSFS extern declarations")
+          if 'susfs_is_sus_mount' not in content:
+              insert_point = '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs.h>\n#endif'
+              if insert_point in content:
+                  content = content.replace(
+                      insert_point,
+                      insert_point + '\n\n'
+                      '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                      'extern bool susfs_is_sus_mount(struct vfsmount *mnt);\n'
+                      'extern int susfs_get_non_sus_mnt_id_from_mnt(struct mount *mnt);\n'
+                      '#endif'
+                  )
+              changes += 1
+              print("  [OK] Added SUSFS extern declarations")
 
-if 'susfs_is_sus_mount' not in content and 'show_vfsmnt' in content:
-    content_fixed = content.replace(
-        'static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)\n{',
-        'static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)\n{\n'
-        '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-        '\tif (susfs_is_sus_mount(mnt))\n'
-        '\t\treturn SEQ_SKIP;\n'
-        '#endif',
-        1
-    )
-    if content_fixed != content:
-        content = content_fixed
-        changes += 1
-        print("  [OK] Added SUSFS check to show_vfsmnt")
+          if 'susfs_is_sus_mount' not in content and 'show_vfsmnt' in content:
+              content_fixed = content.replace(
+                  'static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)\n{',
+                  'static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)\n{\n'
+                  '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                  '\tif (susfs_is_sus_mount(mnt))\n'
+                  '\t\treturn SEQ_SKIP;\n'
+                  '#endif',
+                  1
+              )
+              if content_fixed != content:
+                  content = content_fixed
+                  changes += 1
+                  print("  [OK] Added SUSFS check to show_vfsmnt")
 
-if 'show_mountinfo' in content and content.count('susfs_is_sus_mount') < 2:
-    pattern_mountinfo = r'(static int show_mountinfo\(struct seq_file \*m, struct vfsmount \*mnt\)\s*\{)'
-    match = re.search(pattern_mountinfo, content)
-    if match:
-        old = match.group(0)
-        content = content.replace(old, old + '\n'
-            '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-            '\tif (susfs_is_sus_mount(mnt))\n'
-            '\t\treturn SEQ_SKIP;\n'
-            '#endif', 1)
-        changes += 1
-        print("  [OK] Added SUSFS check to show_mountinfo")
+          if 'show_mountinfo' in content and content.count('susfs_is_sus_mount') < 2:
+              pattern_mountinfo = r'(static int show_mountinfo\(struct seq_file \*m, struct vfsmount \*mnt\)\s*\{)'
+              match = re.search(pattern_mountinfo, content)
+              if match:
+                  old = match.group(0)
+                  content = content.replace(old, old + '\n'
+                      '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                      '\tif (susfs_is_sus_mount(mnt))\n'
+                      '\t\treturn SEQ_SKIP;\n'
+                      '#endif', 1)
+                  changes += 1
+                  print("  [OK] Added SUSFS check to show_mountinfo")
 
-    if 'susfs_get_non_sus_mnt_id_from_mnt' not in content:
-        old_seq = 'seq_printf(m, "%i %i %u:%u ", r->mnt_id, r->mnt_parent->mnt_id,'
-        if old_seq in content:
-            new_seq = (
-                '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-                '\tseq_printf(m, "%i %i %u:%u ",\n'
-                '\t\tsusfs_get_non_sus_mnt_id_from_mnt(r),\n'
-                '\t\tsusfs_get_non_sus_mnt_id_from_mnt(r->mnt_parent),\n'
-                '#else\n'
-                '\tseq_printf(m, "%i %i %u:%u ", r->mnt_id, r->mnt_parent->mnt_id,\n'
-                '#endif'
-            )
-            content = content.replace(old_seq, new_seq, 1)
-            changes += 1
-            print("  [OK] Added mnt_id spoofing")
+              if 'susfs_get_non_sus_mnt_id_from_mnt' not in content:
+                  old_seq = 'seq_printf(m, "%i %i %u:%u ", r->mnt_id, r->mnt_parent->mnt_id,'
+                  if old_seq in content:
+                      new_seq = (
+                          '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                          '\tseq_printf(m, "%i %i %u:%u ",\n'
+                          '\t\tsusfs_get_non_sus_mnt_id_from_mnt(r),\n'
+                          '\t\tsusfs_get_non_sus_mnt_id_from_mnt(r->mnt_parent),\n'
+                          '#else\n'
+                          '\tseq_printf(m, "%i %i %u:%u ", r->mnt_id, r->mnt_parent->mnt_id,\n'
+                          '#endif'
+                      )
+                      content = content.replace(old_seq, new_seq, 1)
+                      changes += 1
+                      print("  [OK] Added mnt_id spoofing")
 
-if 'show_vfsstat' in content and content.count('susfs_is_sus_mount') < 3:
-    pattern_vfsstat = r'(static int show_vfsstat\(struct seq_file \*m, struct vfsmount \*mnt\)\s*\{)'
-    match = re.search(pattern_vfsstat, content)
-    if match:
-        old = match.group(0)
-        content = content.replace(old, old + '\n'
-            '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-            '\tif (susfs_is_sus_mount(mnt))\n'
-            '\t\treturn SEQ_SKIP;\n'
-            '#endif', 1)
-        changes += 1
-        print("  [OK] Added SUSFS check to show_vfsstat")
+          if 'show_vfsstat' in content and content.count('susfs_is_sus_mount') < 3:
+              pattern_vfsstat = r'(static int show_vfsstat\(struct seq_file \*m, struct vfsmount \*mnt\)\s*\{)'
+              match = re.search(pattern_vfsstat, content)
+              if match:
+                  old = match.group(0)
+                  content = content.replace(old, old + '\n'
+                      '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                      '\tif (susfs_is_sus_mount(mnt))\n'
+                      '\t\treturn SEQ_SKIP;\n'
+                      '#endif', 1)
+                  changes += 1
+                  print("  [OK] Added SUSFS check to show_vfsstat")
 
-with open("fs/proc_namespace.c", "w") as f:
-    f.write(content)
+          with open("fs/proc_namespace.c", "w") as f:
+              f.write(content)
 
-print("")
-print("  Total changes: " + str(changes))
-PYEOF
+          print("")
+          print("  Total changes: " + str(changes))
+          PYEOF
 
           rm -f "${FILE}.rej"
           echo "[OK] ${FILE} fixed"
 
-      - name: "Manual fix fs/proc/task_mmu.c SUSFS sus_map"
+      - name: "Manual fix fs proc task_mmu c SUSFS sus_map"
         run: |
           cd ${{ env.KERNEL_DIR }}
           FILE="fs/proc/task_mmu.c"
@@ -382,70 +375,70 @@ PYEOF
           echo "[FIX] Applying manual fix for ${FILE}..."
 
           python3 <<'PYEOF'
-import re
+          import re
 
-with open("fs/proc/task_mmu.c", "r") as f:
-    content = f.read()
+          with open("fs/proc/task_mmu.c", "r") as f:
+              content = f.read()
 
-changes = 0
+          changes = 0
 
-if '#include <linux/susfs.h>' not in content:
-    if '#include "../baikalfs.h"' in content:
-        content = content.replace(
-            '#include "../baikalfs.h"',
-            '#include "../baikalfs.h"\n'
-            '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
-            '#include <linux/susfs.h>\n'
-            '#endif'
-        )
-    else:
-        content = content.replace(
-            '#include "internal.h"',
-            '#include "internal.h"\n'
-            '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
-            '#include <linux/susfs.h>\n'
-            '#endif'
-        )
-    changes += 1
-    print("  [OK] Added SUSFS include")
+          if '#include <linux/susfs.h>' not in content:
+              if '#include "../baikalfs.h"' in content:
+                  content = content.replace(
+                      '#include "../baikalfs.h"',
+                      '#include "../baikalfs.h"\n'
+                      '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
+                      '#include <linux/susfs.h>\n'
+                      '#endif'
+                  )
+              else:
+                  content = content.replace(
+                      '#include "internal.h"',
+                      '#include "internal.h"\n'
+                      '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
+                      '#include <linux/susfs.h>\n'
+                      '#endif'
+                  )
+              changes += 1
+              print("  [OK] Added SUSFS include")
 
-if 'SUSFS_IS_INODE_SUS_MAP' not in content and 'show_map_vma' in content:
-    old_func = 'static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)\n{'
-    if old_func in content:
-        new_func = (
-            'static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)\n{\n'
-            '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
-            '\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n'
-            '\t\treturn;\n'
-            '#endif'
-        )
-        content = content.replace(old_func, new_func, 1)
-        changes += 1
-        print("  [OK] Added SUSFS check to show_map_vma")
+          if 'SUSFS_IS_INODE_SUS_MAP' not in content and 'show_map_vma' in content:
+              old_func = 'static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)\n{'
+              if old_func in content:
+                  new_func = (
+                      'static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)\n{\n'
+                      '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
+                      '\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n'
+                      '\t\treturn;\n'
+                      '#endif'
+                  )
+                  content = content.replace(old_func, new_func, 1)
+                  changes += 1
+                  print("  [OK] Added SUSFS check to show_map_vma")
 
-if 'SUSFS_IS_INODE_SUS_MAP' not in content or content.count('SUSFS_IS_INODE_SUS_MAP') < 2:
-    old_show_smap = 'static int show_smap(struct seq_file *m, void *v, int is_pid)\n{'
-    if old_show_smap in content:
-        new_show_smap = (
-            'static int show_smap(struct seq_file *m, void *v, int is_pid)\n{\n'
-            '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
-            '\t{\n'
-            '\t\tstruct vm_area_struct *check_vma = v;\n'
-            '\t\tif (check_vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(check_vma->vm_file)))\n'
-            '\t\t\treturn SEQ_SKIP;\n'
-            '\t}\n'
-            '#endif'
-        )
-        content = content.replace(old_show_smap, new_show_smap, 1)
-        changes += 1
-        print("  [OK] Added SUSFS check to show_smap")
+          if 'SUSFS_IS_INODE_SUS_MAP' not in content or content.count('SUSFS_IS_INODE_SUS_MAP') < 2:
+              old_show_smap = 'static int show_smap(struct seq_file *m, void *v, int is_pid)\n{'
+              if old_show_smap in content:
+                  new_show_smap = (
+                      'static int show_smap(struct seq_file *m, void *v, int is_pid)\n{\n'
+                      '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
+                      '\t{\n'
+                      '\t\tstruct vm_area_struct *check_vma = v;\n'
+                      '\t\tif (check_vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(check_vma->vm_file)))\n'
+                      '\t\t\treturn SEQ_SKIP;\n'
+                      '\t}\n'
+                      '#endif'
+                  )
+                  content = content.replace(old_show_smap, new_show_smap, 1)
+                  changes += 1
+                  print("  [OK] Added SUSFS check to show_smap")
 
-with open("fs/proc/task_mmu.c", "w") as f:
-    f.write(content)
+          with open("fs/proc/task_mmu.c", "w") as f:
+              f.write(content)
 
-print("")
-print("  Total changes: " + str(changes))
-PYEOF
+          print("")
+          print("  Total changes: " + str(changes))
+          PYEOF
 
           rm -f "${FILE}.rej"
           echo "[OK] ${FILE} fixed"
@@ -457,7 +450,7 @@ PYEOF
           echo "[CHK] Checking for remaining reject files..."
           REMAINING_REJECTS=$(find . -name "*.rej" 2>/dev/null)
           if [ -n "$REMAINING_REJECTS" ]; then
-            echo "[WARN] Remaining reject files (attempting auto-fix):"
+            echo "[WARN] Remaining reject files:"
             for rej in $REMAINING_REJECTS; do
               echo "  [FILE] $rej"
               cat "$rej"
@@ -466,7 +459,7 @@ PYEOF
 
             for rej in $REMAINING_REJECTS; do
               TARGET_FILE="${rej%.rej}"
-              echo "  [FIX] Attempting to apply $rej with fuzz..."
+              echo "  [FIX] Trying $rej with fuzz..."
               patch --fuzz=3 "$TARGET_FILE" < "$rej" || true
               rm -f "$rej"
             done
@@ -487,7 +480,7 @@ PYEOF
             if [ -f "$f" ]; then
               echo "  [OK] $f exists"
             else
-              echo "  [i]  $f not found (may be expected)"
+              echo "  [i]  $f not found"
             fi
           done
 
@@ -501,7 +494,7 @@ PYEOF
           cp ../repo/extracted-config/${{ env.DEFCONFIG_NAME }} \
              arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
 
-          echo "[INFO] Defconfig copied to arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
+          echo "[INFO] Defconfig copied"
 
           DEFCONFIG="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
 
@@ -517,7 +510,7 @@ PYEOF
             echo "  ${key}=${val}"
           }
 
-          echo "[NOTE] Ensuring KSU + SUSFS configs are enabled..."
+          echo "[NOTE] Ensuring KSU + SUSFS configs..."
           add_config "CONFIG_KSU" "y"
           add_config "CONFIG_KSU_SUSFS" "y"
           add_config "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT" "y"
@@ -633,7 +626,7 @@ PYEOF
           if-no-files-found: warn
           retention-days: 7
 
-      - name: "Upload full out directory for zip builder"
+      - name: Upload full out directory
         uses: actions/upload-artifact@v4
         with:
           name: kernel-out-full
