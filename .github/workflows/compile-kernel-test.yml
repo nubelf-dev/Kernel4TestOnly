@@ -346,8 +346,10 @@ jobs:
           PYEOF
 
           # Tambah extern declarations di proc_namespace.c
-          # PENTING: symbol name & type harus MATCH dengan definisi di susfs.c
-          if [ -f fs/proc_namespace.c ] && ! grep -q "susfs_is_hide_sus_mnts_for_non_su_procs_enabled" fs/proc_namespace.c; then
+          # FIX: grep untuk EXTERN, bukan cuma nama variable
+          # (karena variable name muncul juga di body function yang sudah ter-apply)
+          if [ -f fs/proc_namespace.c ] && ! grep -qE "^extern.*susfs_is_hide_sus_mnts" fs/proc_namespace.c; then
+            echo "  [INFO] Injecting SUSFS extern to fs/proc_namespace.c..."
             python3 <<'PYEOF'
           from pathlib import Path
           p = Path("fs/proc_namespace.c")
@@ -366,9 +368,14 @@ jobs:
                       ''
                   ])
                   inserted = True
-          p.write_text('\n'.join(new_lines))
-          print("  [OK] Added SUSFS extern to proc_namespace.c")
+          if inserted:
+              p.write_text('\n'.join(new_lines))
+              print("  [OK] Added SUSFS extern to proc_namespace.c")
+          else:
+              print("  [FAIL] Could not find #include \"internal.h\" as insertion point")
           PYEOF
+          else
+            echo "  [SKIP] SUSFS extern already in proc_namespace.c"
           fi
 
           # Tambah extern declaration di stat.c
@@ -421,6 +428,15 @@ jobs:
           PYEOF
           fi
 
+          # VERIFIKASI extern sudah masuk
+          echo ""
+          echo "== Verifikasi extern declarations =="
+          echo "-- fs/proc_namespace.c (SUSFS externs) --"
+          grep -nE "^extern.*susfs" fs/proc_namespace.c || echo "  [WARN] No SUSFS externs found"
+          echo "-- fs/stat.c (SUSFS externs) --"
+          grep -nE "^extern.*susfs" fs/stat.c || echo "  [WARN] No SUSFS externs found"
+
+          echo ""
           echo "[OK] SUSFS manual fixes applied"
 
       # ================================================================
