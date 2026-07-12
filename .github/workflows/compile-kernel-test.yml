@@ -1,6 +1,7 @@
 ###############################################################################
 #  compile-kernel-test.yml
 #  Compile BaikalOS 13.0 kernel 4.9.337 sdm845 + ReSukiSU + SUSFS 2.2.0
+#  Manual hook injection (7 hooks) - kompatibel ReSukiSU (no kprobe)
 ###############################################################################
 
 name: Compile Kernel (Test)
@@ -38,11 +39,17 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      # ================================================================
+      # 1. Checkout this repo
+      # ================================================================
       - name: Checkout this repository
         uses: actions/checkout@v4
         with:
           path: repo
 
+      # ================================================================
+      # 2. Install dependencies
+      # ================================================================
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
@@ -55,6 +62,9 @@ jobs:
             xsltproc zip zlib1g-dev python3 python-is-python3 \
             cpio kmod
 
+      # ================================================================
+      # 3. Cache Clang toolchain
+      # ================================================================
       - name: Cache Clang
         id: cache-clang
         uses: actions/cache@v4
@@ -73,6 +83,9 @@ jobs:
           echo "[OK] Clang downloaded"
           toolchain/clang/bin/clang --version || true
 
+      # ================================================================
+      # 4. Cache GCC toolchains
+      # ================================================================
       - name: "Cache GCC64 aarch64"
         id: cache-gcc64
         uses: actions/cache@v4
@@ -101,6 +114,9 @@ jobs:
             ${{ env.GCC32_REPO }} toolchain/gcc32
           echo "[OK] GCC32 downloaded"
 
+      # ================================================================
+      # 5. Clone kernel source
+      # ================================================================
       - name: Clone BaikalOS kernel source
         run: |
           git clone --depth=1 -b ${{ env.KERNEL_BRANCH }} \
@@ -109,6 +125,9 @@ jobs:
           echo "[INFO] Kernel version: $(make kernelversion)"
           echo "[INFO] HEAD: $(git log --oneline -1)"
 
+      # ================================================================
+      # 6. Integrate ReSukiSU
+      # ================================================================
       - name: Integrate ReSukiSU
         run: |
           cd ${{ env.KERNEL_DIR }}
@@ -117,29 +136,31 @@ jobs:
           echo "[OK] ReSukiSU integrated"
           ls -la KernelSU/ || ls -la drivers/kernelsu/ || echo "[WARN] KernelSU dir check"
 
-      # ============================================================
-      # STEP Generate ksu_hook.h dari signature ASLI (7 hooks)
-      # ============================================================
-      - name: Generate ksu_hook.h (7 hooks - signature ASLI)
+      # ================================================================
+      # 7. Generate ksu_hook.h dari signature ASLI ReSukiSU
+      # ================================================================
+      - name: "Generate ksu_hook h from ReSukiSU source"
         run: |
           cd ${{ env.KERNEL_DIR }}
 
-          python3 << 'PYEOF'
+          python3 <<'PYEOF'
           import re
           from pathlib import Path
 
-          ksu_dirs = ['KernelSU', 'KernelSU-Next', 'ReSukiSU']
+          ksu_dirs = ['KernelSU', 'KernelSU-Next', 'ReSukiSU', 'drivers/kernelsu']
           ksu_dir = next((d for d in ksu_dirs if Path(d).exists()), None)
           if not ksu_dir:
               print("[FAIL] KSU source dir not found")
               exit(1)
+
+          print("[INFO] Found KSU dir: " + ksu_dir)
 
           signatures = {}
           for pattern in ['*.c', '*.h']:
               for f in Path(ksu_dir).rglob(pattern):
                   try:
                       text = f.read_text(errors='replace')
-                  except:
+                  except Exception:
                       continue
                   for m in re.finditer(
                       r'\b(?:int|void)\s+(ksu_handle_\w+)\s*\(([^)]*)\)\s*[;{]',
@@ -158,7 +179,6 @@ jobs:
                           if name not in signatures or '{' in text[m.end()-1:m.end()]:
                               signatures[name] = (rettype, params)
 
-          # 7 hook WAJIB yang harus di-inject di kernel source
           wajib_hooks = {
               'ksu_handle_execveat',
               'ksu_handle_faccessat',
@@ -169,8 +189,8 @@ jobs:
               'ksu_handle_input_handle_event',
           }
 
-          print(f"Total extracted: {len(signatures)}")
-          print()
+          print("[INFO] Total signatures extracted: " + str(len(signatures)))
+          print("")
 
           header = [
               '/* Auto-generated ksu_hook.h - 7 hook wajib (signature ASLI) */',
@@ -188,23 +208,29 @@ jobs:
           for name in sorted(wajib_hooks):
               if name in signatures:
                   rettype, params = signatures[name]
-                  header.append(f'extern {rettype} {name}({params});')
-                  print(f"  ✓ {rettype} {name}({params})")
+                  header.append('extern {} {}({});'.format(rettype, name, params))
+                  print("  [OK] {} {}({})".format(rettype, name, params))
               else:
-                  print(f"  ⚠ Missing in source: {name}")
+                  print("  [WARN] Missing in source: " + name)
 
           header.append('')
           header.append('#endif')
 
-          Path('include/linux/ksu_hook.h').write_text('\n'.join(header))
-          print()
-          print("== Contents ==")
-          print(Path('include/linux/ksu_hook.h').read_text())
+          out = Path('include/linux/ksu_hook.h')
+          out.parent.mkdir(parents=True, exist_ok=True)
+          out.write_text('\n'.join(header))
+          print("")
+          print("== Contents of include/linux/ksu_hook.h ==")
+          print(out.read_text())
           PYEOF
 
+      # ================================================================
+      # 8. Apply SUSFS patch
+      # ================================================================
       - name: Apply SUSFS patch
         run: |
           cd ${{ env.KERNEL_DIR }}
+
           SUSFS_PATCH_URL="${{ github.event.inputs.susfs_patch_url || 'https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.9.patch' }}"
 
           echo "[INFO] Downloading SUSFS patch..."
@@ -230,308 +256,189 @@ jobs:
             echo "[OK] No reject files"
           fi
 
-      - name: "Manual fix fs stat c SUSFS sus_kstat"
+      # ================================================================
+      # 9. Manual fix SUSFS hunks
+      # ================================================================
+      - name: "Manual fix SUSFS hunks"
         run: |
           cd ${{ env.KERNEL_DIR }}
-          FILE="fs/stat.c"
 
-          if [ ! -f "${FILE}.rej" ]; then
-            echo "[OK] ${FILE}.rej not found - no fix needed"
-            exit 0
+          # Fix proc_namespace.c: tambah include susfs_def.h
+          if [ -f fs/proc_namespace.c ] && ! grep -q "susfs_def.h" fs/proc_namespace.c; then
+            sed -i '/#include "pnode.h"/a\
+          #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
+          #include <linux/susfs_def.h>\
+          #endif' fs/proc_namespace.c || true
           fi
 
-          echo "[FIX] Applying manual fix for ${FILE}..."
-
-          python3 <<'PYEOF'
+          # Fix fs/stat.c: SUSFS sus_kstat hunk
+          if [ -f fs/stat.c ] && ! grep -q "int err = inode->i_op->getattr" fs/stat.c; then
+            python3 <<'PYEOF'
           import re
+          from pathlib import Path
+          p = Path("fs/stat.c")
+          text = p.read_text()
+          pattern = re.compile(
+              r'(\tif\s*\(inode->i_op->getattr\)\s*\n)'
+              r'(\t\treturn inode->i_op->getattr\(path->mnt,\s*path->dentry,\s*stat\);)',
+              re.MULTILINE
+          )
+          replacement = (
+              r'\1'
+              '#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n\t{\n'
+              '\t\tint err = inode->i_op->getattr(path->mnt, path->dentry, stat);\n'
+              '\t\tif (!err)\n'
+              '\t\t\tsusfs_sus_kstat_spoof_generic_fillattr(inode, stat);\n'
+              '\t\treturn err;\n\t}\n#else\n' r'\2' '\n#endif'
+          )
+          new_text, n = pattern.subn(replacement, text)
+          if n > 0:
+              p.write_text(new_text)
+              print("  [OK] Patched fs/stat.c sus_kstat block")
+          else:
+              print("  [WARN] Pattern not found in fs/stat.c")
+          PYEOF
+          fi
 
-          with open("fs/stat.c", "r") as f:
-              content = f.read()
-
-          if '#include <linux/susfs.h>' not in content:
-              if '#include "baikalfs.h"' in content:
-                  content = content.replace(
-                      '#include "baikalfs.h"',
-                      '#include "baikalfs.h"\n'
-                      '#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n'
-                      '#include <linux/susfs.h>\n'
-                      '#endif'
-                  )
-                  print("  [OK] Added SUSFS include")
-
-          if 'susfs_sus_kstat' not in content:
-              old_block = (
-                  "int vfs_getattr_nosec(struct path *path, struct kstat *stat)\n"
-                  "{\n"
-                  "\tstruct inode *inode = d_backing_inode(path->dentry);\n"
-                  "\n"
-                  "\tif (inode->i_op->getattr)\n"
-                  "\t\treturn inode->i_op->getattr(path->mnt, path->dentry, stat);\n"
-                  "\n"
-                  "\tgeneric_fillattr(inode, stat);\n"
-                  "\treturn 0;\n"
-                  "}"
-              )
-              new_block = (
-                  "int vfs_getattr_nosec(struct path *path, struct kstat *stat)\n"
-                  "{\n"
-                  "\tstruct inode *inode = d_backing_inode(path->dentry);\n"
-                  "\n"
-                  "\tif (inode->i_op->getattr)\n"
-                  "\t\treturn inode->i_op->getattr(path->mnt, path->dentry, stat);\n"
-                  "\n"
-                  "\tgeneric_fillattr(inode, stat);\n"
-                  "#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n"
-                  "\tsusfs_sus_kstat(inode, stat);\n"
-                  "#endif\n"
-                  "\treturn 0;\n"
-                  "}"
-              )
-              if old_block in content:
-                  content = content.replace(old_block, new_block)
-                  print("  [OK] Added susfs_sus_kstat() to vfs_getattr_nosec")
-              else:
-                  pattern = r'(generic_fillattr\(inode, stat\);)\s*\n(\s*return 0;\s*\n\}\s*\nEXPORT_SYMBOL\(vfs_getattr_nosec\))'
-                  replacement = r'\1' + '\n#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n\tsusfs_sus_kstat(inode, stat);\n#endif\n' + r'\2'
-                  new_content = re.sub(pattern, replacement, content, count=1)
-                  if new_content != content:
-                      content = new_content
-                      print("  [OK] Added susfs_sus_kstat() via regex")
-                  else:
-                      lines = content.split('\n')
-                      new_lines = []
-                      in_func = False
-                      done = False
-                      for line in lines:
-                          if 'vfs_getattr_nosec' in line and 'int ' in line:
-                              in_func = True
-                          if in_func and not done and 'generic_fillattr(inode, stat)' in line:
-                              new_lines.append(line)
-                              new_lines.append('#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT')
-                              new_lines.append('\tsusfs_sus_kstat(inode, stat);')
-                              new_lines.append('#endif')
-                              done = True
-                              continue
-                          new_lines.append(line)
-                      if done:
-                          content = '\n'.join(new_lines)
-                          print("  [OK] Added susfs_sus_kstat() line-by-line")
-                      else:
-                          print("  [FAIL] Could not patch vfs_getattr_nosec")
-
-          with open("fs/stat.c", "w") as f:
-              f.write(content)
+          # Tambah include SUSFS ke semua file terkait
+          python3 <<'PYEOF'
+          from pathlib import Path
+          for filepath in ["fs/open.c", "fs/stat.c", "fs/proc_namespace.c", "fs/proc/task_mmu.c", "fs/proc/cmdline.c"]:
+              p = Path(filepath)
+              if not p.exists():
+                  continue
+              lines = p.read_text().split('\n')
+              has_susfs = any('linux/susfs.h' in l for l in lines)
+              has_susfs_def = any('linux/susfs_def.h' in l for l in lines)
+              if has_susfs and has_susfs_def:
+                  continue
+              insert_idx = -1
+              for i, line in enumerate(lines):
+                  if line.strip().startswith('#include'):
+                      insert_idx = i
+                      break
+              if insert_idx == -1:
+                  continue
+              new_includes = []
+              if not has_susfs:
+                  new_includes.append('#include <linux/susfs.h>')
+              if not has_susfs_def:
+                  new_includes.append('#include <linux/susfs_def.h>')
+              lines[insert_idx:insert_idx] = new_includes
+              p.write_text('\n'.join(lines))
+              print("  [OK] Added SUSFS includes to " + filepath)
           PYEOF
 
-          rm -f "${FILE}.rej"
-          echo "[OK] ${FILE} fixed"
-
-      - name: "Manual fix fs proc_namespace c SUSFS sus_mount"
-        run: |
-          cd ${{ env.KERNEL_DIR }}
-          FILE="fs/proc_namespace.c"
-
-          if [ ! -f "${FILE}.rej" ]; then
-            echo "[OK] ${FILE}.rej not found - no fix needed"
-            exit 0
+          # Tambah extern declarations di proc_namespace.c
+          if [ -f fs/proc_namespace.c ] && ! grep -q "extern bool susfs_is_current_ksu_domain" fs/proc_namespace.c; then
+            python3 <<'PYEOF'
+          from pathlib import Path
+          p = Path("fs/proc_namespace.c")
+          lines = p.read_text().split('\n')
+          new_lines = []
+          inserted = False
+          for line in lines:
+              new_lines.append(line)
+              if not inserted and '#include "internal.h"' in line:
+                  new_lines.extend([
+                      '',
+                      '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT',
+                      'extern bool susfs_is_current_ksu_domain(void);',
+                      'extern bool susfs_hide_sus_mnts_for_non_su_procs;',
+                      '#endif',
+                      ''
+                  ])
+                  inserted = True
+          p.write_text('\n'.join(new_lines))
+          print("  [OK] Added SUSFS extern to proc_namespace.c")
+          PYEOF
           fi
 
-          echo "[FIX] Applying manual fix for ${FILE}..."
-
-          python3 <<'PYEOF'
-          import re
-
-          with open("fs/proc_namespace.c", "r") as f:
-              content = f.read()
-
-          changes = 0
-
-          if '#include <linux/susfs.h>' not in content:
-              if '#include "baikalfs.h"' in content:
-                  content = content.replace(
-                      '#include "baikalfs.h"',
-                      '#include "baikalfs.h"\n'
-                      '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-                      '#include <linux/susfs.h>\n'
-                      '#endif'
-                  )
-              else:
-                  content = content.replace(
-                      '#include "internal.h"',
-                      '#include "internal.h"\n'
-                      '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-                      '#include <linux/susfs.h>\n'
-                      '#endif'
-                  )
-              changes += 1
-              print("  [OK] Added SUSFS include")
-
-          if 'susfs_is_sus_mount' not in content:
-              insert_point = '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs.h>\n#endif'
-              if insert_point in content:
-                  content = content.replace(
-                      insert_point,
-                      insert_point + '\n\n'
-                      '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-                      'extern bool susfs_is_sus_mount(struct vfsmount *mnt);\n'
-                      'extern int susfs_get_non_sus_mnt_id_from_mnt(struct mount *mnt);\n'
-                      '#endif'
-                  )
-              changes += 1
-              print("  [OK] Added SUSFS extern declarations")
-
-          if 'susfs_is_sus_mount' not in content and 'show_vfsmnt' in content:
-              content_fixed = content.replace(
-                  'static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)\n{',
-                  'static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)\n{\n'
-                  '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-                  '\tif (susfs_is_sus_mount(mnt))\n'
-                  '\t\treturn SEQ_SKIP;\n'
+          # Tambah extern declaration di stat.c
+          if [ -f fs/stat.c ] && ! grep -q "extern void susfs_sus_kstat_spoof_generic_fillattr" fs/stat.c; then
+            python3 <<'PYEOF'
+          from pathlib import Path
+          p = Path("fs/stat.c")
+          lines = p.read_text().split('\n')
+          last_include = -1
+          for i, line in enumerate(lines):
+              if line.strip().startswith('#include'):
+                  last_include = i
+          if last_include >= 0:
+              lines[last_include+1:last_include+1] = [
+                  '',
+                  '#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT',
+                  'extern void susfs_sus_kstat_spoof_generic_fillattr(struct inode *inode, struct kstat *stat);',
                   '#endif',
-                  1
-              )
-              if content_fixed != content:
-                  content = content_fixed
-                  changes += 1
-                  print("  [OK] Added SUSFS check to show_vfsmnt")
-
-          if 'show_mountinfo' in content and content.count('susfs_is_sus_mount') < 2:
-              pattern_mountinfo = r'(static int show_mountinfo\(struct seq_file \*m, struct vfsmount \*mnt\)\s*\{)'
-              match = re.search(pattern_mountinfo, content)
-              if match:
-                  old = match.group(0)
-                  content = content.replace(old, old + '\n'
-                      '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-                      '\tif (susfs_is_sus_mount(mnt))\n'
-                      '\t\treturn SEQ_SKIP;\n'
-                      '#endif', 1)
-                  changes += 1
-                  print("  [OK] Added SUSFS check to show_mountinfo")
-
-              if 'susfs_get_non_sus_mnt_id_from_mnt' not in content:
-                  old_seq = 'seq_printf(m, "%i %i %u:%u ", r->mnt_id, r->mnt_parent->mnt_id,'
-                  if old_seq in content:
-                      new_seq = (
-                          '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-                          '\tseq_printf(m, "%i %i %u:%u ",\n'
-                          '\t\tsusfs_get_non_sus_mnt_id_from_mnt(r),\n'
-                          '\t\tsusfs_get_non_sus_mnt_id_from_mnt(r->mnt_parent),\n'
-                          '#else\n'
-                          '\tseq_printf(m, "%i %i %u:%u ", r->mnt_id, r->mnt_parent->mnt_id,\n'
-                          '#endif'
-                      )
-                      content = content.replace(old_seq, new_seq, 1)
-                      changes += 1
-                      print("  [OK] Added mnt_id spoofing")
-
-          if 'show_vfsstat' in content and content.count('susfs_is_sus_mount') < 3:
-              pattern_vfsstat = r'(static int show_vfsstat\(struct seq_file \*m, struct vfsmount \*mnt\)\s*\{)'
-              match = re.search(pattern_vfsstat, content)
-              if match:
-                  old = match.group(0)
-                  content = content.replace(old, old + '\n'
-                      '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-                      '\tif (susfs_is_sus_mount(mnt))\n'
-                      '\t\treturn SEQ_SKIP;\n'
-                      '#endif', 1)
-                  changes += 1
-                  print("  [OK] Added SUSFS check to show_vfsstat")
-
-          with open("fs/proc_namespace.c", "w") as f:
-              f.write(content)
-
-          print("")
-          print("  Total changes: " + str(changes))
+                  ''
+              ]
+              p.write_text('\n'.join(lines))
+              print("  [OK] Added SUSFS extern to stat.c")
           PYEOF
-
-          rm -f "${FILE}.rej"
-          echo "[OK] ${FILE} fixed"
-
-      - name: "Manual fix fs proc task_mmu c SUSFS sus_map"
-        run: |
-          cd ${{ env.KERNEL_DIR }}
-          FILE="fs/proc/task_mmu.c"
-
-          if [ ! -f "${FILE}.rej" ]; then
-            echo "[OK] ${FILE}.rej not found - no fix needed"
-            exit 0
           fi
 
-          echo "[FIX] Applying manual fix for ${FILE}..."
-
-          python3 <<'PYEOF'
-          import re
-
-          with open("fs/proc/task_mmu.c", "r") as f:
-              content = f.read()
-
-          changes = 0
-
-          if '#include <linux/susfs.h>' not in content:
-              if '#include "../baikalfs.h"' in content:
-                  content = content.replace(
-                      '#include "../baikalfs.h"',
-                      '#include "../baikalfs.h"\n'
-                      '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
-                      '#include <linux/susfs.h>\n'
-                      '#endif'
-                  )
-              else:
-                  content = content.replace(
-                      '#include "internal.h"',
-                      '#include "internal.h"\n'
-                      '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
-                      '#include <linux/susfs.h>\n'
-                      '#endif'
-                  )
-              changes += 1
-              print("  [OK] Added SUSFS include")
-
-          if 'SUSFS_IS_INODE_SUS_MAP' not in content and 'show_map_vma' in content:
-              old_func = 'static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)\n{'
-              if old_func in content:
-                  new_func = (
-                      'static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)\n{\n'
-                      '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
-                      '\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n'
-                      '\t\treturn;\n'
-                      '#endif'
-                  )
-                  content = content.replace(old_func, new_func, 1)
-                  changes += 1
-                  print("  [OK] Added SUSFS check to show_map_vma")
-
-          if 'SUSFS_IS_INODE_SUS_MAP' not in content or content.count('SUSFS_IS_INODE_SUS_MAP') < 2:
-              old_show_smap = 'static int show_smap(struct seq_file *m, void *v, int is_pid)\n{'
-              if old_show_smap in content:
-                  new_show_smap = (
-                      'static int show_smap(struct seq_file *m, void *v, int is_pid)\n{\n'
-                      '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
-                      '\t{\n'
-                      '\t\tstruct vm_area_struct *check_vma = v;\n'
-                      '\t\tif (check_vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(check_vma->vm_file)))\n'
-                      '\t\t\treturn SEQ_SKIP;\n'
-                      '\t}\n'
-                      '#endif'
-                  )
-                  content = content.replace(old_show_smap, new_show_smap, 1)
-                  changes += 1
-                  print("  [OK] Added SUSFS check to show_smap")
-
-          with open("fs/proc/task_mmu.c", "w") as f:
-              f.write(content)
-
-          print("")
-          print("  Total changes: " + str(changes))
+          # Cleanup: hapus duplicate EXPORT_SYMBOL block kalau ada
+          if [ -f fs/stat.c ] && grep -q "^EXPORT_SYMBOL(vfs_getattr_nosec);$" fs/stat.c; then
+            python3 <<'PYEOF'
+          from pathlib import Path
+          p = Path("fs/stat.c")
+          lines = p.read_text().split('\n')
+          new_lines = []
+          i = 0
+          removed = False
+          while i < len(lines):
+              line = lines[i]
+              new_lines.append(line)
+              if (not removed and line.strip() == 'EXPORT_SYMBOL(vfs_getattr_nosec);'
+                  and i + 3 < len(lines)):
+                  if (lines[i+1].strip() == '#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT'
+                      and 'susfs_sus_kstat_spoof_generic_fillattr' in lines[i+2].strip()
+                      and lines[i+3].strip() == '#endif'):
+                      i += 4
+                      removed = True
+                      continue
+              i += 1
+          if removed:
+              p.write_text('\n'.join(new_lines))
+              print("  [OK] Cleaned up duplicate EXPORT_SYMBOL block")
           PYEOF
+          fi
 
-          rm -f "${FILE}.rej"
-          echo "[OK] ${FILE} fixed"
+          echo "[OK] SUSFS manual fixes applied"
 
-      # ============================================================
-      # STEP Inject 7 hook WAJIB dengan signature ASLI
-      # ============================================================
-      - name: Apply 7 hook WAJIB (signature ASLI dari source)
+      # ================================================================
+      # 10. Cleanup remaining reject files
+      # ================================================================
+      - name: Cleanup remaining reject files
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+
+          echo "[CHK] Checking for remaining reject files..."
+          REMAINING=$(find . -name "*.rej" 2>/dev/null)
+          if [ -n "$REMAINING" ]; then
+            echo "[WARN] Remaining reject files (attempting fuzz):"
+            for rej in $REMAINING; do
+              TARGET_FILE="${rej%.rej}"
+              echo "  [FIX] Trying $rej with fuzz..."
+              patch --fuzz=3 "$TARGET_FILE" < "$rej" || true
+              rm -f "$rej"
+            done
+          fi
+
+          FINAL=$(find . -name "*.rej" 2>/dev/null)
+          if [ -n "$FINAL" ]; then
+            echo "[FAIL] Unresolved reject files:"
+            echo "$FINAL"
+            exit 1
+          fi
+
+          find . -name "*.orig" -delete 2>/dev/null || true
+          echo "[OK] Cleanup complete"
+
+      # ================================================================
+      # 11. Inject 7 hook WAJIB (signature ASLI)
+      # ================================================================
+      - name: "Apply 7 hook WAJIB signature ASLI"
         run: |
           cd ${{ env.KERNEL_DIR }}
 
@@ -561,8 +468,6 @@ jobs:
           }
 
           # 1. execveat
-          # signature: int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
-          #                                    void *argv, void *envp, int *flags)
           add_include fs/exec.c
           if ! grep -q "ksu_handle_execveat" fs/exec.c; then
             inject_hook fs/exec.c "static int do_execveat_common" \
@@ -574,17 +479,13 @@ jobs:
           fi
 
           # 2. faccessat
-          # signature: int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
-          #                                     int *mode, int *__unused_flags)
           add_include fs/open.c
           if ! grep -q "ksu_handle_faccessat" fs/open.c; then
             inject_hook fs/open.c "SYSCALL_DEFINE3.faccessat" \
               "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"
           fi
 
-          # 3. stat
-          # signature: int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags)
-          # Note: kernel 4.9 pakai 'flag' (singular), bukan 'flags'
+          # 3. stat (kernel 4.9 pakai 'flag', bukan 'flags')
           add_include fs/stat.c
           if ! grep -q "ksu_handle_stat" fs/stat.c; then
             inject_hook fs/stat.c "SYSCALL_DEFINE4.newfstatat" \
@@ -592,8 +493,6 @@ jobs:
           fi
 
           # 4. sys_read
-          # signature: int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr,
-          #                                    size_t *count_ptr)
           add_include fs/read_write.c
           if ! grep -q "ksu_handle_sys_read" fs/read_write.c; then
             inject_hook fs/read_write.c "SYSCALL_DEFINE3.read" \
@@ -601,7 +500,6 @@ jobs:
           fi
 
           # 5. setresuid
-          # signature: int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
           add_include kernel/sys.c
           if ! grep -q "ksu_handle_setresuid" kernel/sys.c; then
             inject_hook kernel/sys.c "SYSCALL_DEFINE3.setresuid" \
@@ -609,8 +507,6 @@ jobs:
           fi
 
           # 6. sys_reboot
-          # signature: int ksu_handle_sys_reboot(int magic1, int magic2,
-          #                                      unsigned int cmd, void __user **arg)
           add_include kernel/reboot.c
           if [ -f kernel/reboot.c ] && ! grep -q "ksu_handle_sys_reboot" kernel/reboot.c; then
             inject_hook kernel/reboot.c "SYSCALL_DEFINE4.reboot" \
@@ -618,23 +514,17 @@ jobs:
           fi
 
           # 7. input_handle_event
-          # signature: int ksu_handle_input_handle_event(unsigned int *type,
-          #                                              unsigned int *code, int *value)
-          # drivers/input/input.c: void input_handle_event(struct input_dev *dev,
-          #                                                 unsigned int type,
-          #                                                 unsigned int code, int value)
-          # local vars: type, code, value → &type, &code, &value
           add_include drivers/input/input.c
           if ! grep -q "ksu_handle_input_handle_event" drivers/input/input.c; then
             inject_hook drivers/input/input.c "void input_handle_event" \
               "ksu_handle_input_handle_event(&type, &code, &value);"
-            # Fallback kalau static
             if ! grep -q "ksu_handle_input_handle_event" drivers/input/input.c; then
               inject_hook drivers/input/input.c "static void input_handle_event" \
                 "ksu_handle_input_handle_event(&type, &code, &value);"
             fi
           fi
 
+          echo ""
           echo "== Verifikasi 7 hook wajib =="
           for f in fs/exec.c fs/open.c fs/stat.c fs/read_write.c kernel/sys.c kernel/reboot.c drivers/input/input.c; do
             [ -f "$f" ] || continue
@@ -642,50 +532,28 @@ jobs:
             echo "  $f -> ${HOOKS:-NONE}"
           done
 
-      - name: Cleanup and verify SUSFS patch
+      # ================================================================
+      # 12. Verify SUSFS integration
+      # ================================================================
+      - name: Verify SUSFS integration
         run: |
           cd ${{ env.KERNEL_DIR }}
 
-          echo "[CHK] Checking for remaining reject files..."
-          REMAINING_REJECTS=$(find . -name "*.rej" 2>/dev/null)
-          if [ -n "$REMAINING_REJECTS" ]; then
-            echo "[WARN] Remaining reject files:"
-            for rej in $REMAINING_REJECTS; do
-              echo "  [FILE] $rej"
-              cat "$rej"
-              echo ""
-            done
-
-            for rej in $REMAINING_REJECTS; do
-              TARGET_FILE="${rej%.rej}"
-              echo "  [FIX] Trying $rej with fuzz..."
-              patch --fuzz=3 "$TARGET_FILE" < "$rej" || true
-              rm -f "$rej"
-            done
-          fi
-
-          FINAL_REJECTS=$(find . -name "*.rej" 2>/dev/null)
-          if [ -n "$FINAL_REJECTS" ]; then
-            echo "[FAIL] Unresolved reject files remain:"
-            echo "$FINAL_REJECTS"
-            exit 1
-          fi
-
-          find . -name "*.orig" -delete 2>/dev/null || true
-
-          echo ""
           echo "[CHK] Verifying SUSFS integration..."
-          for f in fs/susfs.c include/linux/susfs.h KernelSU/kernel/susfs.c; do
+          for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h include/linux/ksu_hook.h KernelSU/kernel/susfs.c; do
             if [ -f "$f" ]; then
               echo "  [OK] $f exists"
             else
-              echo "  [i]  $f not found"
+              echo "  [i]  $f not found (may be expected)"
             fi
           done
 
           echo ""
-          echo "[OK] SUSFS patch verification complete"
+          echo "[OK] Verification complete"
 
+      # ================================================================
+      # 13. Setup defconfig
+      # ================================================================
       - name: Setup defconfig
         run: |
           cd ${{ env.KERNEL_DIR }}
@@ -709,8 +577,13 @@ jobs:
             echo "  ${key}=${val}"
           }
 
-          echo "[NOTE] Ensuring KSU + SUSFS configs..."
+          echo "[NOTE] Ensuring KSU + SUSFS + manual hook configs..."
+
+          # ReSukiSU wajib manual hook (no kprobe)
           add_config "CONFIG_KSU" "y"
+          add_config "CONFIG_KSU_MANUAL_HOOK" "y"
+
+          # SUSFS features
           add_config "CONFIG_KSU_SUSFS" "y"
           add_config "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT" "y"
           add_config "CONFIG_KSU_SUSFS_SUS_PATH" "y"
@@ -722,11 +595,13 @@ jobs:
           add_config "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG" "y"
           add_config "CONFIG_KSU_SUSFS_OPEN_REDIRECT" "y"
           add_config "CONFIG_KSU_SUSFS_SUS_MAP" "y"
-          add_config "CONFIG_KSU_MANUAL_HOOK" "y"
 
           echo ""
           echo "[OK] Defconfig ready"
 
+      # ================================================================
+      # 14. Build kernel
+      # ================================================================
       - name: Build kernel
         run: |
           cd ${{ env.KERNEL_DIR }}
@@ -766,13 +641,16 @@ jobs:
           echo "================================================"
           echo "  Compiling kernel..."
           echo "================================================"
-          make "${MAKE_ARGS[@]}" 2>&1 | tail -50
+          make "${MAKE_ARGS[@]}" 2>&1 | tail -100
 
           echo ""
           echo "================================================"
           echo "  Build completed"
           echo "================================================"
 
+      # ================================================================
+      # 15. Verify kernel output
+      # ================================================================
       - name: Verify kernel output
         run: |
           cd ${{ env.KERNEL_DIR }}
@@ -812,6 +690,9 @@ jobs:
 
           echo "[OK] Kernel build verification complete"
 
+      # ================================================================
+      # 16. Upload artifacts
+      # ================================================================
       - name: Upload kernel image
         uses: actions/upload-artifact@v4
         with:
@@ -834,6 +715,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
+      # ================================================================
+      # 17. Build summary
+      # ================================================================
       - name: Build summary
         if: always()
         run: |
@@ -843,11 +727,11 @@ jobs:
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Kernel Source | baikalos/android_kernel_xiaomi_sdm845 branch 13.0 |" >> $GITHUB_STEP_SUMMARY
           echo "| Kernel Version | 4.9.337 |" >> $GITHUB_STEP_SUMMARY
-          echo "| Root Solution | ReSukiSU |" >> $GITHUB_STEP_SUMMARY
+          echo "| Root Solution | ReSukiSU (manual hook, 7 hooks) |" >> $GITHUB_STEP_SUMMARY
           echo "| SUSFS | v2.2.0 |" >> $GITHUB_STEP_SUMMARY
           echo "| Clang | ${{ env.CLANG_VERSION }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| GCC64 | aarch64-linux-android-4.9 |" >> $GITHUB_STEP_SUMMARY
-          echo "| GCC32 | arm-linux-androideabi-4.9 |" >> $GITHUB_STEP_SUMMARY
+          echo "| GCC64 | aarch64-linux-android-4.9 (${{ env.GCC_BRANCH }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| GCC32 | arm-linux-androideabi-4.9 (${{ env.GCC_BRANCH }}) |" >> $GITHUB_STEP_SUMMARY
           echo "| KBUILD_BUILD_USER | ${{ env.KBUILD_BUILD_USER }} |" >> $GITHUB_STEP_SUMMARY
           echo "| KBUILD_BUILD_HOST | ${{ env.KBUILD_BUILD_HOST }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Defconfig | ${{ env.DEFCONFIG_NAME }} |" >> $GITHUB_STEP_SUMMARY
