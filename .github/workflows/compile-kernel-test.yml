@@ -1,9 +1,3 @@
-###############################################################################
-#  compile-kernel-test.yml
-#  Compile BaikalOS 13.0 kernel 4.9.337 sdm845 + ReSukiSU + SUSFS 2.2.0
-#  Manual hook injection (7 hooks) - kompatibel ReSukiSU (no kprobe)
-###############################################################################
-
 name: Compile Kernel (Test)
 
 on:
@@ -27,9 +21,6 @@ env:
   KBUILD_BUILD_HOST: "OldlineSSS"
   CLANG_VERSION: clang-r487747c
   CLANG_URL: "https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz"
-  # GCC64_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
-  # GCC32_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
-  # GCC_BRANCH: android-9.0.0_r61
   RESUKISU_REPO: https://github.com/ReSukiSU/ReSukiSU
 
 jobs:
@@ -40,7 +31,7 @@ jobs:
 
     steps:
       # ================================================================
-      # 1. Checkout this repo
+      # 1. Checkout & Cache setup
       # ================================================================
       - name: Checkout this repository
         uses: actions/checkout@v4
@@ -52,8 +43,9 @@ jobs:
         with:
           path: .ccache
           key: ccache-kernel-${{ github.sha }}
-          restore-keys: ccache-kernel-
-      
+          restore-keys: |
+            ccache-kernel-
+
       # ================================================================
       # 2. Install dependencies
       # ================================================================
@@ -69,11 +61,22 @@ jobs:
             squashfs-tools xsltproc zip zlib1g-dev \
             python3 python-is-python3 cpio kmod \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi g++-arm-linux-gnueabi \
-            ca-certificates clang lld llvm
-            
+            binutils-arm-linux-gnueabi \
+            ca-certificates lld llvm
+
+          # Verify assemblers exist
+          echo "[INFO] Verifying cross toolchain assemblers..."
+          which aarch64-linux-gnu-as || echo "[FAIL] aarch64-linux-gnu-as not found"
+          which arm-linux-gnueabi-as || echo "[FAIL] arm-linux-gnueabi-as not found"
+
+          # Init ccache
+          ccache --max-size=5G
+          ccache --show-stats
+
       # ================================================================
-      # 3. Cache Clang toolchain
+      # 3. Cache & Download Clang toolchain
       # ================================================================
       - name: Cache Clang
         id: cache-clang
@@ -94,40 +97,7 @@ jobs:
           toolchain/clang/bin/clang --version || true
 
       # ================================================================
-      # 4. Cache GCC toolchains
-      # ================================================================
-      # - name: "Cache GCC64 aarch64"
-      #  id: cache-gcc64
-      #  uses: actions/cache@v4
-      #  with:
-      #    path: toolchain/gcc64
-      #    key: gcc64-aarch64-4.9-${{ env.GCC_BRANCH }}-v1
-
-      #- name: "Download GCC64 if cache miss"
-      #  if: steps.cache-gcc64.outputs.cache-hit != 'true'
-      #  run: |
-      #    mkdir -p toolchain/gcc64
-      #   git clone --depth=1 -b ${{ env.GCC_BRANCH }} \
-      #      ${{ env.GCC64_REPO }} toolchain/gcc64
-      #    echo "[OK] GCC64 downloaded"
-
-      #- name: "Cache GCC32 arm"
-      #  id: cache-gcc32
-      #  uses: actions/cache@v4
-      #  with:
-      #    path: toolchain/gcc32
-      #    key: gcc32-arm-4.9-${{ env.GCC_BRANCH }}-v1
-
-      #- name: "Download GCC32 if cache miss"
-      #  if: steps.cache-gcc32.outputs.cache-hit != 'true'
-      #  run: |
-      #    mkdir -p toolchain/gcc32
-      #    git clone --depth=1 -b ${{ env.GCC_BRANCH }} \
-      #      ${{ env.GCC32_REPO }} toolchain/gcc32
-      #    echo "[OK] GCC32 downloaded"
-
-      # ================================================================
-      # 5. Clone kernel source
+      # 4. Clone kernel source
       # ================================================================
       - name: Clone BaikalOS kernel source
         run: |
@@ -138,7 +108,7 @@ jobs:
           echo "[INFO] HEAD: $(git log --oneline -1)"
 
       # ================================================================
-      # 6. Integrate ReSukiSU
+      # 5. Integrate ReSukiSU
       # ================================================================
       - name: Integrate ReSukiSU
         run: |
@@ -149,7 +119,7 @@ jobs:
           ls -la KernelSU/ || ls -la drivers/kernelsu/ || echo "[WARN] KernelSU dir check"
 
       # ================================================================
-      # 7. Generate ksu_hook.h dari signature ASLI ReSukiSU
+      # 6. Generate ksu_hook.h dari signature ASLI ReSukiSU
       # ================================================================
       - name: "Generate ksu_hook h from ReSukiSU source"
         run: |
@@ -237,7 +207,7 @@ jobs:
           PYEOF
 
       # ================================================================
-      # 8. Apply SUSFS patch
+      # 7. Apply SUSFS patch
       # ================================================================
       - name: Apply SUSFS patch
         run: |
@@ -269,7 +239,7 @@ jobs:
           fi
 
       # ================================================================
-      # 9. Manual fix SUSFS hunks
+      # 8. Manual fix SUSFS hunks
       # ================================================================
       - name: "Manual fix SUSFS hunks"
         run: |
@@ -419,7 +389,7 @@ jobs:
           echo "[OK] SUSFS manual fixes applied"
 
       # ================================================================
-      # 10. Cleanup remaining reject files
+      # 9. Cleanup remaining reject files
       # ================================================================
       - name: Cleanup remaining reject files
         run: |
@@ -448,7 +418,7 @@ jobs:
           echo "[OK] Cleanup complete"
 
       # ================================================================
-      # 11. Inject 7 hook WAJIB (signature ASLI)
+      # 10. Inject 7 hook WAJIB (signature ASLI)
       # ================================================================
       - name: "Apply 7 hook WAJIB signature ASLI"
         run: |
@@ -545,7 +515,7 @@ jobs:
           done
 
       # ================================================================
-      # 12. Verify SUSFS integration
+      # 11. Verify SUSFS integration
       # ================================================================
       - name: Verify SUSFS integration
         run: |
@@ -564,7 +534,7 @@ jobs:
           echo "[OK] Verification complete"
 
       # ================================================================
-      # 13. Setup defconfig
+      # 12. Setup defconfig
       # ================================================================
       - name: Setup defconfig
         run: |
@@ -611,58 +581,51 @@ jobs:
           echo ""
           echo "[OK] Defconfig ready"
 
-      - name: Patch arch/arm64/Makefile (fix clang vdso32 "-EL" assembler error)
+      # ================================================================
+      # 13. Fix CLANG_PREFIX32 for VDSO 32-bit compat
+      # ================================================================
+      - name: "Patch arch/arm64/Makefile - fix CLANG_PREFIX32"
         run: |
           cd ${{ env.KERNEL_DIR }}
           MAIN_MK="arch/arm64/Makefile"
 
           if [ ! -f "$MAIN_MK" ]; then
-            echo "ERROR: $MAIN_MK tidak ditemukan!"
+            echo "[FAIL] $MAIN_MK not found"
             exit 1
           fi
 
-          echo "== Cari blok CLANG_PREFIX32 / GCC_TOOLCHAIN32 di $MAIN_MK =="
-          grep -n "CLANG_PREFIX32\|GCC_TOOLCHAIN32\|CLANG_TARGET_ARM32\|CLANG_GCC32_TC" "$MAIN_MK" || echo "TIDAK DITEMUKAN sama sekali!"
+          echo "== CLANG_PREFIX32 / GCC_TOOLCHAIN32 lookup =="
+          grep -n "CLANG_PREFIX32\|GCC_TOOLCHAIN32\|CLANG_TARGET_ARM32\|CLANG_GCC32_TC" "$MAIN_MK" || echo "  [i] Not found in this kernel"
 
           cp "$MAIN_MK" "$MAIN_MK.orig"
 
-          # Fix resmi: arm64: vdso32: Fix '--prefix=' value for newer versions of clang
-          # https://github.com/ClangBuiltLinux/linux/issues/1099
-          # CLANG_PREFIX32 harus menyertakan nama prefix CROSS_COMPILE_ARM32, bukan cuma direktorinya.
-          # Pattern asli biasanya:
-          #   export CLANG_PREFIX32 := --prefix=$(GCC_TOOLCHAIN32_DIR)
-          # diubah jadi:
-          #   export CLANG_PREFIX32 := --prefix=$(GCC_TOOLCHAIN32_DIR)$(notdir $(CROSS_COMPILE_ARM32))
+          # Official ClangBuiltLinux fix (issue #1099)
           sed -i -E \
             's@(CLANG_PREFIX32[[:space:]]*:=[[:space:]]*--prefix=\$\(GCC_TOOLCHAIN32_DIR\))[[:space:]]*$@\1$(notdir $(CROSS_COMPILE_ARM32))@' \
             "$MAIN_MK"
 
           if ! diff -q "$MAIN_MK" "$MAIN_MK.orig" > /dev/null; then
-            echo "[OK] Patch CLANG_PREFIX32 berhasil diterapkan."
-            echo "== Baris setelah patch =="
+            echo "[OK] CLANG_PREFIX32 patch applied"
             grep -n "CLANG_PREFIX32" "$MAIN_MK"
           else
-            echo "[PERINGATAN] Pattern CLANG_PREFIX32 tidak match/tidak berubah."
-            echo "Menampilkan 15 baris di sekitar definisi CLANG_PREFIX32 untuk diperiksa manual:"
-            grep -n -B5 -A10 "CLANG_TARGET_ARM32\|CLANG_PREFIX32" "$MAIN_MK" || true
+            echo "[i] CLANG_PREFIX32 pattern not matched (may be optional)"
           fi
 
           rm -f "$MAIN_MK.orig"
 
-      - name: Skip DTB yang tidak relevan/rusak (QVR headset, interposer SDM670)
+      # ================================================================
+      # 14. Skip broken DTB (QVR headset, interposer SDM670)
+      # ================================================================
+      - name: "Skip broken DTB (QVR, SDM670 interposer)"
         run: |
           cd ${{ env.KERNEL_DIR }}
           DTS_MK="arch/arm64/boot/dts/qcom/Makefile"
 
           if [ ! -f "$DTS_MK" ]; then
-            echo "PERINGATAN: $DTS_MK tidak ditemukan, skip step ini."
+            echo "[WARN] $DTS_MK not found, skipping"
             exit 0
           fi
 
-          # 4 dtb ini BUKAN untuk Poco F1/beryllium (QVR = Qualcomm VR reference headset,
-          # interposer-sdm670 = board test interposer), dan rusak (phandle reference hilang)
-          # di kernel source ini. Kita hapus dari daftar build supaya target `dtbs`
-          # (yang menjadi dependency Image.gz-dtb) bisa sukses sepenuhnya.
           BROKEN_DTBS=(
             "sdm845-v2-qvr-evt.dtb"
             "sdm845-v2-qvr-dvt.dtb"
@@ -675,33 +638,27 @@ jobs:
           for dtb in "${BROKEN_DTBS[@]}"; do
             if grep -q "$dtb" "$DTS_MK"; then
               sed -i "/$dtb/d" "$DTS_MK"
-              echo "[OK] Baris untuk $dtb dihapus dari $DTS_MK."
+              echo "[OK] Removed $dtb from $DTS_MK"
             else
-              echo "[INFO] $dtb tidak ditemukan di $DTS_MK (mungkin sudah tidak ada / nama beda)."
+              echo "[i] $dtb not in $DTS_MK (skipped)"
             fi
           done
 
-          echo "== Diff perubahan =="
+          echo "== Diff =="
           diff "$DTS_MK.orig" "$DTS_MK" || true
 
-          rm -f "$DTS_MK.orig"      
-      
+          rm -f "$DTS_MK.orig"
+
       # ================================================================
-      # 14. Build Kernel
+      # 15. Build Kernel
       # ================================================================
       - name: Build kernel
         run: |
-          # Path absolut toolchain
+          # Setup toolchain paths
           CLANG_DIR="$GITHUB_WORKSPACE/toolchain/clang"
-          # GCC64_DIR="$GITHUB_WORKSPACE/toolchain/gcc64"
-          # GCC32_DIR="$GITHUB_WORKSPACE/toolchain/gcc32"
-
-          # Setup PATH
-          # export PATH="${CLANG_DIR}/bin:${GCC64_DIR}/bin:${GCC32_DIR}/bin:${PATH}"
-          # Hanya butuh Clang
           export PATH="${CLANG_DIR}/bin:${PATH}"
-          
-          # Konfigurasi Env
+
+          # Environment
           export ARCH=arm64
           export SUBARCH=arm64
           export KBUILD_BUILD_USER="${{ env.KBUILD_BUILD_USER }}"
@@ -709,56 +666,75 @@ jobs:
           export USE_CCACHE=1
           export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
 
-          # Masuk ke kernel
           cd ${{ env.KERNEL_DIR }}
 
-          # 1. Patch CLANG_PREFIX32 (untuk fix vdso32 assembler error)
-          MAIN_MK="arch/arm64/Makefile"
-          if [ -f "$MAIN_MK" ]; then
-            echo "[INFO] Applying CLANG_PREFIX32 patch..."
-            sed -i -E 's@(CLANG_PREFIX32[[:space:]]*:=[[:space:]]*--prefix=\$\(GCC_TOOLCHAIN32_DIR\))[[:space:]]*$@\1$(notdir $(CROSS_COMPILE_ARM32))@' "$MAIN_MK"
-          fi
+          # ---- Toolchain verification ----
+          echo "[INFO] Toolchain versions:"
+          clang --version | head -1
+          ld.lld --version | head -1
+          aarch64-linux-gnu-as --version | head -1
+          arm-linux-gnueabi-as --version | head -1
+          echo ""
 
-          # 2. Patch VDSO Makefile (hapus -integrated-as & paksa GNU Assembler)
-          if [ -f arch/arm64/kernel/vdso/Makefile ]; then
-            echo "[INFO] Patching VDSO Makefile..."
-            sed -i 's|-integrated-as||g' arch/arm64/kernel/vdso/Makefile
-            if ! grep -q "aarch64-linux-android-as" arch/arm64/kernel/vdso/Makefile; then
-              echo "AS := aarch64-linux-android-as" >> arch/arm64/kernel/vdso/Makefile
-            fi
-          fi
+          # ---- Kernel 4.9 Clang IAS incompatibility fix ----
+          # Kernel 4.9 VDSO code (khususnya vgettimeofday.c dan sigreturn.S)
+          # menggunakan directive assembler yang tidak kompatibel dengan
+          # Clang integrated assembler. Solusi paling reliable:
+          # LLVM_IAS=0 -> delegasikan assembly ke GNU AS (aarch64-linux-gnu-as)
+          #
+          # Ini juga menyelesaikan masalah dimana kernel Makefile lama
+          # tidak recognize LLVM_IAS variable.
 
-          # Izin eksekusi
-          # chmod -R +x ${CLANG_DIR}/bin ${GCC64_DIR}/bin ${GCC32_DIR}/bin
-          chmod -R +x ${CLANG_DIR}/bin
-
-          # Argumen Build
           MAKE_ARGS=(
             -j$(nproc --all)
             O=out
             ARCH=arm64
-            CC="ccache clang"          # Menggunakan ccache untuk mempercepat build
-            LD=ld.lld                  # Linker LLVM
-            AR=llvm-ar                 # Archiver LLVM
-            NM=llvm-nm                 # NM LLVM
+            LLVM=1
+            LLVM_IAS=0
+            CC="ccache clang"
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
             OBJCOPY=llvm-objcopy
             OBJDUMP=llvm-objdump
             STRIP=llvm-strip
             READELF=llvm-readelf
+            HOSTCC=clang
+            HOSTCXX=clang++
             CLANG_TRIPLE=aarch64-linux-gnu-
             CROSS_COMPILE=aarch64-linux-gnu-
             CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-            LLVM=1
-            LLVM_IAS=1
           )
 
-          # Eksekusi
-          echo "[INFO] Starting compilation..."
+          echo "================================================"
+          echo "  Generating defconfig: ${{ env.DEFCONFIG_NAME }}"
+          echo "================================================"
           make "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG_NAME }}
-          make "${MAKE_ARGS[@]}"
+
+          echo ""
+          echo "================================================"
+          echo "  Compiling kernel..."
+          echo "================================================"
+          make "${MAKE_ARGS[@]}" 2>&1 | tee build.log | tail -200
+
+          BUILD_STATUS=${PIPESTATUS[0]}
+
+          echo ""
+          echo "================================================"
+          if [ $BUILD_STATUS -eq 0 ]; then
+            echo "  [OK] Build completed successfully"
+            ccache --show-stats
+          else
+            echo "  [FAIL] Build failed with exit code $BUILD_STATUS"
+            echo ""
+            echo "== Last 150 lines of build log =="
+            tail -150 build.log
+            exit $BUILD_STATUS
+          fi
+          echo "================================================"
 
       # ================================================================
-      # 15. Verify kernel output
+      # 16. Verify kernel output
       # ================================================================
       - name: Verify kernel output
         run: |
@@ -800,7 +776,7 @@ jobs:
           echo "[OK] Kernel build verification complete"
 
       # ================================================================
-      # 16. Upload artifacts
+      # 17. Upload artifacts
       # ================================================================
       - name: Upload kernel image
         uses: actions/upload-artifact@v4
@@ -825,7 +801,7 @@ jobs:
           retention-days: 3
 
       # ================================================================
-      # 17. Build summary
+      # 18. Build summary
       # ================================================================
       - name: Build summary
         if: always()
@@ -839,8 +815,8 @@ jobs:
           echo "| Root Solution | ReSukiSU (manual hook, 7 hooks) |" >> $GITHUB_STEP_SUMMARY
           echo "| SUSFS | v2.2.0 |" >> $GITHUB_STEP_SUMMARY
           echo "| Clang | ${{ env.CLANG_VERSION }} |" >> $GITHUB_STEP_SUMMARY
-          # echo "| GCC64 | aarch64-linux-android-4.9 (${{ env.GCC_BRANCH }}) |" >> $GITHUB_STEP_SUMMARY
-          # echo "| GCC32 | arm-linux-androideabi-4.9 (${{ env.GCC_BRANCH }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cross Toolchain | GNU (Ubuntu apt) aarch64-linux-gnu + arm-linux-gnueabi |" >> $GITHUB_STEP_SUMMARY
+          echo "| Assembler | GNU AS (LLVM_IAS=0) |" >> $GITHUB_STEP_SUMMARY
           echo "| KBUILD_BUILD_USER | ${{ env.KBUILD_BUILD_USER }} |" >> $GITHUB_STEP_SUMMARY
           echo "| KBUILD_BUILD_HOST | ${{ env.KBUILD_BUILD_HOST }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Defconfig | ${{ env.DEFCONFIG_NAME }} |" >> $GITHUB_STEP_SUMMARY
