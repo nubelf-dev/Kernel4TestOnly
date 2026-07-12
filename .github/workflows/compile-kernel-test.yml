@@ -652,6 +652,7 @@ jobs:
             O=out
             ARCH=arm64
             CC="ccache clang"
+            LD=ld.bfd
             CLANG_TRIPLE=aarch64-linux-gnu-
             CROSS_COMPILE=aarch64-linux-android-
             CROSS_COMPILE_ARM32=arm-linux-androideabi-
