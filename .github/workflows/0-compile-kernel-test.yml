@@ -1,392 +1,206 @@
-name: "0. Compile Kernel [TEST]"
-
-# =============================================================================
-#  BaikalOS 13.0 - Xiaomi SDM845 Kernel Compile (ReSukiSU + SUSFS v2.2.0)
-# -----------------------------------------------------------------------------
-#  Source kernel : https://github.com/baikalos/android_kernel_xiaomi_sdm845
-#  Branch        : 13.0
-#  Defconfig asli: arch/arm64/configs/vendor/xiaomi/mi845_defconfig
-#  Defconfig pakai: extracted-config/bos13_defconfig (hasil extract-ikconfig
-#                    dari boot.img BaikalOS, sudah lebih matching dgn device)
-#  Root         : ReSukiSU  -> kernel/setup.sh
-#  SUSFS        : v2.2.0 patch_to_4.9 dari NonGKI_Kernel_Build_2nd
-#  Toolchain    : Clang r487747c (di-cache) + GCC64/GCC32 (prebuilt, di-cache)
-#  Nama kernel  : TIDAK diubah, mengikuti defconfig asli (LOCALVERSION tetap)
-# =============================================================================
+name: 0-compile-kernel-test
 
 on:
   workflow_dispatch:
-    inputs:
-      kernel_repo:
-        description: "URL repo kernel BaikalOS"
-        required: true
-        default: "https://github.com/baikalos/android_kernel_xiaomi_sdm845"
-      kernel_branch:
-        description: "Branch kernel"
-        required: true
-        default: "13.0"
-      defconfig:
-        description: "Nama defconfig yang dipakai untuk compile (ada di extracted-config/)"
-        required: true
-        default: "bos13_defconfig"
-      enable_susfs:
-        description: "Integrasikan ReSukiSU + SUSFS v2.2.0?"
-        required: true
-        type: boolean
-        default: true
-      enable_ccache:
-        description: "Gunakan ccache untuk mempercepat build?"
-        required: true
-        type: boolean
-        default: true
-      enable_kpm:
-        description: "Aktifkan CONFIG_KPM (ReSukiSU KernelPatch module)?"
-        required: true
-        type: boolean
-        default: false
   push:
-    branches: [ "main" ]
     paths:
       - ".github/workflows/0-compile-kernel-test.yml"
-      - "extracted-config/**"
-
-concurrency:
-  group: compile-kernel-test-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
-
-env:
-  KERNEL_REPO: ${{ github.event.inputs.kernel_repo || 'https://github.com/baikalos/android_kernel_xiaomi_sdm845' }}
-  KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || '13.0' }}
-  KERNEL_DIR: "kernel"
-  ARCH: arm64
-  SUBARCH: arm64
-  # Defconfig asli (referensi saja, TIDAK dipakai langsung untuk compile)
-  ORIGINAL_DEFCONFIG_PATH: "arch/arm64/configs/vendor/xiaomi/mi845_defconfig"
-  # Defconfig hasil extract-ikconfig boot.img BaikalOS -> dipakai untuk compile
-  EXTRACTED_DEFCONFIG_DIR: "extracted-config"
-  DEFCONFIG_NAME: ${{ github.event.inputs.defconfig || 'bos13_defconfig' }}
-  # ReSukiSU
-  RESUKISU_SETUP_URL: "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh"
-  # SUSFS v2.2.0 (patch untuk kernel 4.9)
-  SUSFS_PATCH_URL: "https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd/raw/mainline/Patches/Patch/susfs_patch_to_4.9.patch"
-  # Toolchain
-  CLANG_URL: "https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz"
-  CLANG_NAME: "clang-r487747c"
-  GCC64_REPO: "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9"
-  GCC32_REPO: "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9"
-  TC_DIR: "${{ github.workspace }}/toolchains"
-  # Identitas build kernel (WAJIB sesuai permintaan, kernel name tidak berubah)
-  KBUILD_BUILD_USER: "Nerf."
-  KBUILD_BUILD_HOST: "OldlineSSS"
+      - "extracted-config/bos13_defconfig"
 
 jobs:
-  compile:
-    name: "Compile Kernel (${{ github.event.inputs.defconfig || 'bos13_defconfig' }})"
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KERNEL_REPO: https://github.com/baikalos/android_kernel_xiaomi_sdm845
+      KERNEL_BRANCH: "13.0"
+      KERNEL_DIR: kernel
+      DEFCONFIG_NAME: bos13_defconfig
+      KBUILD_BUILD_USER: "Nerf."
+      KBUILD_BUILD_HOST: "OldlineSSS"
+      CLANG_VERSION: clang-r487747c
+      CLANG_ARCHIVE_URL_MAIN: https://github.com/tan2ardiansyah/compiler-nub/releases/download/clang-toolchain/clang-r487747c.tar.gz
+      CLANG_ARCHIVE_URL_MASTER: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r487747c.tar.gz
+      GCC64_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
+      GCC32_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
+      SUSFS_PATCH_URL: https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.9.patch
 
     steps:
-      # -----------------------------------------------------------------
-      - name: "Checkout repository"
+      - name: Checkout workflow repo
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: "Cek keberadaan extracted-config/${{ env.DEFCONFIG_NAME }}"
-        run: |
-          if [ ! -f "${EXTRACTED_DEFCONFIG_DIR}/${DEFCONFIG_NAME}" ]; then
-            echo "::error::File ${EXTRACTED_DEFCONFIG_DIR}/${DEFCONFIG_NAME} tidak ditemukan di repo ini."
-            exit 1
-          fi
-          echo "Defconfig ditemukan: ${EXTRACTED_DEFCONFIG_DIR}/${DEFCONFIG_NAME}"
-
-      # -----------------------------------------------------------------
-      - name: "Bersihkan disk (biar cukup space untuk build kernel)"
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
-                      /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
-          sudo docker image prune --all --force || true
-          df -h
-
-      - name: "Tambah swap space"
-        uses: pierotofy/set-swap-space@master
-        with:
-          swap-size-gb: 12
-
-      - name: "Install dependensi build"
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential ccache curl flex git gnupg gperf \
-            lib32ncurses5-dev libc6-dev-i386 libncurses-dev libssl-dev \
-            libelf-dev lz4 lzop rsync schedtool squashfs-tools xsltproc \
-            zip zlib1g-dev python3 python-is-python3 device-tree-compiler \
-            u-boot-tools unzip
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            cpio \
+            curl \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            lld \
+            python3 \
+            rsync \
+            unzip \
+            xz-utils \
+            zip
 
-      # -----------------------------------------------------------------
-      # Cache Clang r487747c
-      # -----------------------------------------------------------------
-      - name: "Cache Clang toolchain"
-        id: cache-clang
+      - name: Restore toolchain cache
+        id: cache-toolchains
         uses: actions/cache@v4
         with:
-          path: ${{ env.TC_DIR }}/clang
-          key: clang-${{ env.CLANG_NAME }}-v1
+          path: |
+            toolchains/clang-r487747c
+            toolchains/gcc64
+            toolchains/gcc32
+          key: ${{ runner.os }}-toolchains-clang-r487747c-gcc-4.9-v1
 
-      - name: "Download & extract Clang (jika belum ada cache)"
-        if: steps.cache-clang.outputs.cache-hit != 'true'
+      - name: Download clang-r487747c + GCC32/GCC64 (cached)
         run: |
-          mkdir -p "${TC_DIR}/clang"
-          echo "Mengunduh Clang dari ${CLANG_URL}"
-          curl -L --retry 3 -o clang.tar.gz "${CLANG_URL}"
-          tar -xf clang.tar.gz -C "${TC_DIR}/clang"
-          rm -f clang.tar.gz
+          set -euxo pipefail
+          mkdir -p toolchains/clang-r487747c toolchains/gcc64 toolchains/gcc32
 
-      # -----------------------------------------------------------------
-      # Cache GCC64 & GCC32 (prebuilt cross compiler, untuk CROSS_COMPILE)
-      # -----------------------------------------------------------------
-      - name: "Cache GCC64 (aarch64-linux-android-4.9)"
-        id: cache-gcc64
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.TC_DIR }}/gcc64
-          key: gcc64-aarch64-linux-android-4.9-v1
+          if [ ! -x toolchains/clang-r487747c/bin/clang ]; then
+            tmp_tar="/tmp/clang-r487747c.tar.gz"
+            if ! curl -fL "${CLANG_ARCHIVE_URL_MAIN}" -o "${tmp_tar}"; then
+              curl -fL "${CLANG_ARCHIVE_URL_MASTER}" -o "${tmp_tar}"
+            fi
+            tar -xzf "${tmp_tar}" -C toolchains/clang-r487747c
+          fi
 
-      - name: "Clone GCC64 (jika belum ada cache)"
-        if: steps.cache-gcc64.outputs.cache-hit != 'true'
-        run: git clone --depth=1 "${GCC64_REPO}" "${TC_DIR}/gcc64"
+          if [ ! -x toolchains/gcc64/bin/aarch64-linux-android-gcc ]; then
+            rm -rf toolchains/gcc64
+            git clone --depth=1 "${GCC64_REPO}" toolchains/gcc64
+          fi
 
-      - name: "Cache GCC32 (arm-linux-androideabi-4.9)"
-        id: cache-gcc32
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.TC_DIR }}/gcc32
-          key: gcc32-arm-linux-androideabi-4.9-v1
+          if [ ! -x toolchains/gcc32/bin/arm-linux-androideabi-gcc ]; then
+            rm -rf toolchains/gcc32
+            git clone --depth=1 "${GCC32_REPO}" toolchains/gcc32
+          fi
 
-      - name: "Clone GCC32 (jika belum ada cache)"
-        if: steps.cache-gcc32.outputs.cache-hit != 'true'
-        run: git clone --depth=1 "${GCC32_REPO}" "${TC_DIR}/gcc32"
-
-      # -----------------------------------------------------------------
-      # ccache
-      # -----------------------------------------------------------------
-      - name: "Cache ccache"
-        if: ${{ github.event.inputs.enable_ccache != 'false' }}
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ccache-${{ env.KERNEL_BRANCH }}-${{ github.run_id }}
-          restore-keys: |
-            ccache-${{ env.KERNEL_BRANCH }}-
-
-      - name: "Setup ccache"
-        if: ${{ github.event.inputs.enable_ccache != 'false' }}
+      - name: Clone BaikalOS kernel source
         run: |
-          mkdir -p ~/.ccache
-          ccache --max-size=8G
-          ccache -z
-          echo "USE_CCACHE=1" >> "$GITHUB_ENV"
-          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+          set -euxo pipefail
+          git clone --depth=1 --branch "${KERNEL_BRANCH}" "${KERNEL_REPO}" "${KERNEL_DIR}"
 
-      # -----------------------------------------------------------------
-      # Clone kernel source BaikalOS
-      # -----------------------------------------------------------------
-      - name: "Clone kernel source (baikalos, branch ${{ env.KERNEL_BRANCH }})"
-        run: |
-          git clone --depth=1 -b "${KERNEL_BRANCH}" "${KERNEL_REPO}" "${KERNEL_DIR}"
-          echo "Defconfig asli tersedia di: ${KERNEL_DIR}/${ORIGINAL_DEFCONFIG_PATH}"
-          ls -la "${KERNEL_DIR}/${ORIGINAL_DEFCONFIG_PATH}" || echo "::warning::Defconfig asli tidak ditemukan pada path yang diharapkan"
-
-      # -----------------------------------------------------------------
-      # Integrasi ReSukiSU + SUSFS v2.2.0
-      # -----------------------------------------------------------------
-      - name: "Integrasi ReSukiSU"
-        if: ${{ github.event.inputs.enable_susfs != 'false' }}
+      - name: Integrate ReSukiSU + SUSFS patch (with fallback fix)
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          echo "Menambahkan ReSukiSU ke kernel source tree..."
-          curl -LSs "${RESUKISU_SETUP_URL}" | bash -
-          echo "Isi root kernel setelah integrasi:"
-          ls -la | grep -i -E "sukisu|kernelsu" || true
+          set -euxo pipefail
 
-      - name: "Download & terapkan patch SUSFS v2.2.0"
-        if: ${{ github.event.inputs.enable_susfs != 'false' }}
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          echo "Mengunduh patch SUSFS 2.2.0 untuk kernel 4.9..."
-          curl -LSs -o susfs_patch_to_4.9.patch "${SUSFS_PATCH_URL}"
+          apply_fallback_susfs() {
+            echo "Applying compatibility fallback from susfs4ksu kernel-4.9 branch."
+            git reset --hard
+            git clean -fd
 
-          echo "Menerapkan patch..."
-          set +e
-          patch -p1 --fuzz=5 --forward < susfs_patch_to_4.9.patch
-          PATCH_STATUS=$?
-          set -e
+            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-          REJECTS=$(find . -name "*.rej" 2>/dev/null)
-          if [ -n "$REJECTS" ]; then
-            echo "::error::Ada hunk patch SUSFS yang gagal diterapkan:"
-            for f in $REJECTS; do
-              echo "----- $f -----"
-              cat "$f"
-            done
+            rm -rf /tmp/susfs4ksu
+            git clone --depth=1 --branch kernel-4.9 https://github.com/ShirkNeko/susfs4ksu /tmp/susfs4ksu
+
+            cp /tmp/susfs4ksu/kernel_patches/fs/susfs.c fs/
+            cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
+
+            if [ -f /tmp/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ]; then
+              (cd KernelSU && patch -p1 --forward < /tmp/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true)
+            fi
+
+            if [ -f /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.9.patch ]; then
+              patch -p1 --forward < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.9.patch || true
+            else
+              patch -p1 --forward < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel.patch || true
+            fi
+          }
+
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+
+          curl -fL "${SUSFS_PATCH_URL}" -o /tmp/susfs_patch_to_4.9.patch
+
+          if git apply --check /tmp/susfs_patch_to_4.9.patch; then
+            git apply --whitespace=nowarn /tmp/susfs_patch_to_4.9.patch
+          else
+            echo "Primary susfs_patch_to_4.9.patch failed. Trying relaxed apply."
+            patch -p1 --forward --fuzz=3 < /tmp/susfs_patch_to_4.9.patch || true
+
+            if find . -name "*.rej" | grep -q .; then
+              apply_fallback_susfs
+            fi
+          fi
+
+          # Basic guard to ensure susfs files were injected by either primary or fallback flow.
+          if [ ! -f include/linux/susfs.h ]; then
+            apply_fallback_susfs
+          fi
+
+          if find . -name "*.rej" | grep -q .; then
+            echo "Patch rejects still exist after fallback flow:"
+            find . -name "*.rej" -print
             exit 1
           fi
 
-          if [ $PATCH_STATUS -ne 0 ]; then
-            echo "::error::Patch SUSFS gagal diterapkan (exit code $PATCH_STATUS)"
+      - name: Prepare bos13_defconfig
+        run: |
+          set -euxo pipefail
+
+          if [ ! -f "extracted-config/${DEFCONFIG_NAME}" ]; then
+            echo "Missing extracted-config/${DEFCONFIG_NAME}"
             exit 1
           fi
 
-          rm -f susfs_patch_to_4.9.patch
-          echo "Patch SUSFS v2.2.0 berhasil diterapkan."
+          mkdir -p "${KERNEL_DIR}/arch/arm64/configs/vendor"
+          cp "extracted-config/${DEFCONFIG_NAME}" "${KERNEL_DIR}/arch/arm64/configs/${DEFCONFIG_NAME}"
+          cp "extracted-config/${DEFCONFIG_NAME}" "${KERNEL_DIR}/arch/arm64/configs/vendor/${DEFCONFIG_NAME}"
 
-      # -----------------------------------------------------------------
-      # Pasang defconfig hasil extract-ikconfig + aktifkan KSU/SUSFS
-      # -----------------------------------------------------------------
-      - name: "Salin extracted-config/${{ env.DEFCONFIG_NAME }} ke kernel tree"
-        run: |
-          mkdir -p "${KERNEL_DIR}/arch/arm64/configs"
-          cp -v "${EXTRACTED_DEFCONFIG_DIR}/${DEFCONFIG_NAME}" "${KERNEL_DIR}/arch/arm64/configs/${DEFCONFIG_NAME}"
-
-      - name: "Export environment toolchain"
-        run: |
-          echo "${TC_DIR}/clang/bin" >> "$GITHUB_PATH"
-          echo "${TC_DIR}/gcc64/bin" >> "$GITHUB_PATH"
-          echo "${TC_DIR}/gcc32/bin" >> "$GITHUB_PATH"
-          echo "LD_LIBRARY_PATH=${TC_DIR}/clang/lib:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-
-      - name: "Generate .config dari ${{ env.DEFCONFIG_NAME }}"
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          export ARCH=${ARCH}
-          export SUBARCH=${SUBARCH}
-          make O=out "${DEFCONFIG_NAME}"
-
-      - name: "Aktifkan CONFIG_KSU + CONFIG_KSU_SUSFS pada .config"
-        if: ${{ github.event.inputs.enable_susfs != 'false' }}
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          CFG="./scripts/config --file out/.config"
-
-          # ReSukiSU (root) - manual hook (non-GKI, tanpa kprobe)
-          $CFG -e KSU
-          $CFG -e KSU_MANUAL_HOOK
-          $CFG -d KPROBES
-
-          # SUSFS v2.2.0
-          $CFG -e KSU_SUSFS
-          $CFG -e KSU_SUSFS_SUS_PATH
-          $CFG -e KSU_SUSFS_SUS_MOUNT
-          $CFG -e KSU_SUSFS_SUS_KSTAT
-          $CFG -e KSU_SUSFS_SUS_SU 2>/dev/null || true
-          $CFG -e KSU_SUSFS_TRY_UMOUNT
-          $CFG -e KSU_SUSFS_SPOOF_UNAME
-          $CFG -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
-          $CFG -e KSU_SUSFS_ENABLE_LOG
-          $CFG -e KSU_SUSFS_OPEN_REDIRECT
-          $CFG -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
-
-          if [ "${{ github.event.inputs.enable_kpm }}" = "true" ]; then
-            $CFG -e KPM
+          if ! grep -q "^CONFIG_KSU=y" "${KERNEL_DIR}/arch/arm64/configs/${DEFCONFIG_NAME}"; then
+            echo "CONFIG_KSU=y" >> "${KERNEL_DIR}/arch/arm64/configs/${DEFCONFIG_NAME}"
+          fi
+          if ! grep -q "^CONFIG_KSU_SUSFS=y" "${KERNEL_DIR}/arch/arm64/configs/${DEFCONFIG_NAME}"; then
+            echo "CONFIG_KSU_SUSFS=y" >> "${KERNEL_DIR}/arch/arm64/configs/${DEFCONFIG_NAME}"
           fi
 
-          echo "Menyamakan ulang .config (olddefconfig) agar dependency Kconfig konsisten..."
-          make O=out ARCH=${ARCH} olddefconfig
-
-      - name: "Tampilkan ringkasan konfigurasi KSU/SUSFS"
+      - name: Build kernel 4.9.337 (BaikalOS 13.0)
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          grep -E "CONFIG_KSU|CONFIG_LOCALVERSION" out/.config || true
+          set -euxo pipefail
 
-      # -----------------------------------------------------------------
-      # Compile kernel
-      # -----------------------------------------------------------------
-      - name: "Compile kernel"
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          export PATH="${TC_DIR}/clang/bin:${TC_DIR}/gcc64/bin:${TC_DIR}/gcc32/bin:${PATH}"
-          export KBUILD_BUILD_USER="${KBUILD_BUILD_USER}"
-          export KBUILD_BUILD_HOST="${KBUILD_BUILD_HOST}"
+          export PATH="${GITHUB_WORKSPACE}/toolchains/clang-r487747c/bin:${GITHUB_WORKSPACE}/toolchains/gcc64/bin:${GITHUB_WORKSPACE}/toolchains/gcc32/bin:${PATH}"
 
-          CCACHE_BIN=""
-          if [ "${{ github.event.inputs.enable_ccache }}" != "false" ]; then
-            CCACHE_BIN="ccache "
-          fi
+          make O=out ARCH=arm64 ${DEFCONFIG_NAME}
+          make O=out ARCH=arm64 olddefconfig
 
-          make -j"$(nproc --all)" \
-            O=out \
-            ARCH=${ARCH} \
-            SUBARCH=${SUBARCH} \
-            CC="${CCACHE_BIN}clang" \
-            LD=ld.lld \
+          make -j"$(nproc --all)" O=out \
+            ARCH=arm64 \
+            CC=clang \
+            LLVM=1 \
+            LLVM_IAS=0 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
             AR=llvm-ar \
             NM=llvm-nm \
             OBJCOPY=llvm-objcopy \
             OBJDUMP=llvm-objdump \
             STRIP=llvm-strip \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE="${TC_DIR}/gcc64/bin/aarch64-linux-android-" \
-            CROSS_COMPILE_ARM32="${TC_DIR}/gcc32/bin/arm-linux-androideabi-" \
-            KBUILD_BUILD_USER="${KBUILD_BUILD_USER}" \
-            KBUILD_BUILD_HOST="${KBUILD_BUILD_HOST}" \
-            2>&1 | tee "${GITHUB_WORKSPACE}/build.log"
+            LD=ld.lld
 
-      - name: "Statistik ccache"
-        if: ${{ always() && github.event.inputs.enable_ccache != 'false' }}
-        run: ccache -s || true
-
-      # -----------------------------------------------------------------
-      # Verifikasi hasil build
-      # -----------------------------------------------------------------
-      - name: "Cek hasil kernel Image"
-        working-directory: ${{ env.KERNEL_DIR }}
+      - name: Collect build outputs
         run: |
-          IMG_PATH=""
-          for f in out/arch/arm64/boot/Image out/arch/arm64/boot/Image.gz out/arch/arm64/boot/Image.gz-dtb; do
-            if [ -f "$f" ]; then
-              IMG_PATH="$f"
-              break
-            fi
-          done
+          set -euxo pipefail
+          mkdir -p artifacts
 
-          if [ -z "$IMG_PATH" ]; then
-            echo "::error::Kernel Image tidak ditemukan, build gagal."
-            exit 1
-          fi
+          cp -v "${KERNEL_DIR}/out/.config" artifacts/config.final || true
+          cp -v "${KERNEL_DIR}/out/arch/arm64/boot/Image" artifacts/ || true
+          cp -v "${KERNEL_DIR}/out/arch/arm64/boot/Image.gz" artifacts/ || true
+          cp -v "${KERNEL_DIR}/out/arch/arm64/boot/Image.gz-dtb" artifacts/ || true
+          cp -v "${KERNEL_DIR}/out/arch/arm64/boot/dtbo.img" artifacts/ || true
+          find "${KERNEL_DIR}/out/arch/arm64/boot" -maxdepth 2 -type f -name "*.dtb" -exec cp -v {} artifacts/ \; || true
 
-          echo "Kernel berhasil dibuild: $IMG_PATH"
-          echo "KERNEL_IMAGE_PATH=${{ env.KERNEL_DIR }}/$IMG_PATH" >> "$GITHUB_ENV"
-
-          echo "Kernel version string:"
-          strings "$IMG_PATH" | grep -m1 "Linux version" || true
-
-      # -----------------------------------------------------------------
-      # Upload artifact (Image + dtb/dtbo + .config) untuk dipakai
-      # oleh 2-build-flashable-zip-test.yml
-      # -----------------------------------------------------------------
-      - name: "Upload artifact kernel"
-        if: success()
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-output-${{ github.run_id }}
-          retention-days: 7
-          path: |
-            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image
-            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz
-            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
-            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/dtb
-            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/dtbo.img
-            ${{ env.KERNEL_DIR }}/out/.config
-          if-no-files-found: warn
-
-      - name: "Upload build log (untuk debugging)"
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log-${{ github.run_id }}
-          retention-days: 7
-          path: build.log
-          if-no-files-found: ignore
+          name: baikalos13-kernel-4.9.337-resukisu-susfs-test
+          path: artifacts
+          if-no-files-found: error
