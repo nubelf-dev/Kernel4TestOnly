@@ -839,8 +839,8 @@ jobs:
           echo "| Root Solution | ReSukiSU (manual hook, 7 hooks) |" >> $GITHUB_STEP_SUMMARY
           echo "| SUSFS | v2.2.0 |" >> $GITHUB_STEP_SUMMARY
           echo "| Clang | ${{ env.CLANG_VERSION }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| GCC64 | aarch64-linux-android-4.9 (${{ env.GCC_BRANCH }}) |" >> $GITHUB_STEP_SUMMARY
-          echo "| GCC32 | arm-linux-androideabi-4.9 (${{ env.GCC_BRANCH }}) |" >> $GITHUB_STEP_SUMMARY
+          # echo "| GCC64 | aarch64-linux-android-4.9 (${{ env.GCC_BRANCH }}) |" >> $GITHUB_STEP_SUMMARY
+          # echo "| GCC32 | arm-linux-androideabi-4.9 (${{ env.GCC_BRANCH }}) |" >> $GITHUB_STEP_SUMMARY
           echo "| KBUILD_BUILD_USER | ${{ env.KBUILD_BUILD_USER }} |" >> $GITHUB_STEP_SUMMARY
           echo "| KBUILD_BUILD_HOST | ${{ env.KBUILD_BUILD_HOST }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Defconfig | ${{ env.DEFCONFIG_NAME }} |" >> $GITHUB_STEP_SUMMARY
