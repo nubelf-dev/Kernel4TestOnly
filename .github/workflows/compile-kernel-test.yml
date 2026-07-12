@@ -654,11 +654,9 @@ jobs:
       # ================================================================
       - name: Build kernel
         run: |
-          # Setup toolchain paths
           CLANG_DIR="$GITHUB_WORKSPACE/toolchain/clang"
           export PATH="${CLANG_DIR}/bin:${PATH}"
 
-          # Environment
           export ARCH=arm64
           export SUBARCH=arm64
           export KBUILD_BUILD_USER="${{ env.KBUILD_BUILD_USER }}"
@@ -668,7 +666,6 @@ jobs:
 
           cd ${{ env.KERNEL_DIR }}
 
-          # ---- Toolchain verification ----
           echo "[INFO] Toolchain versions:"
           clang --version | head -1
           ld.lld --version | head -1
@@ -676,17 +673,7 @@ jobs:
           arm-linux-gnueabi-as --version | head -1
           echo ""
 
-          # ---- Kernel 4.9 Clang IAS incompatibility fix ----
-          # Kernel 4.9 VDSO code (khususnya vgettimeofday.c dan sigreturn.S)
-          # menggunakan directive assembler yang tidak kompatibel dengan
-          # Clang integrated assembler. Solusi paling reliable:
-          # LLVM_IAS=0 -> delegasikan assembly ke GNU AS (aarch64-linux-gnu-as)
-          #
-          # Ini juga menyelesaikan masalah dimana kernel Makefile lama
-          # tidak recognize LLVM_IAS variable.
-
           MAKE_ARGS=(
-            -j$(nproc --all)
             O=out
             ARCH=arm64
             LLVM=1
@@ -709,29 +696,72 @@ jobs:
           echo "================================================"
           echo "  Generating defconfig: ${{ env.DEFCONFIG_NAME }}"
           echo "================================================"
-          make "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG_NAME }}
+          make -j$(nproc --all) "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG_NAME }}
 
           echo ""
           echo "================================================"
-          echo "  Compiling kernel..."
+          echo "  Compiling kernel (parallel)..."
           echo "================================================"
-          make "${MAKE_ARGS[@]}" 2>&1 | tee build.log | tail -200
 
+          # Simpan full log ke build.log
+          set +e
+          make -j$(nproc --all) "${MAKE_ARGS[@]}" 2>&1 | tee build.log
           BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
 
           echo ""
           echo "================================================"
           if [ $BUILD_STATUS -eq 0 ]; then
             echo "  [OK] Build completed successfully"
             ccache --show-stats
-          else
-            echo "  [FAIL] Build failed with exit code $BUILD_STATUS"
-            echo ""
-            echo "== Last 150 lines of build log =="
-            tail -150 build.log
-            exit $BUILD_STATUS
+            exit 0
           fi
+
+          echo "  [FAIL] Build failed with exit code $BUILD_STATUS"
           echo "================================================"
+          echo ""
+
+          # =============================================================
+          # DIAGNOSTIC: Extract error yang beneran
+          # =============================================================
+          echo "======================================================"
+          echo "  DIAGNOSTIC: Grep 'error:' / 'Error' / 'fatal:' lines"
+          echo "======================================================"
+          grep -nE 'error:|Error [0-9]+|fatal:|undefined reference|multiple definition' build.log | head -50
+          echo ""
+
+          echo "======================================================"
+          echo "  DIAGNOSTIC: 30 lines around first 'error:' or 'Error'"
+          echo "======================================================"
+          FIRST_ERROR_LINE=$(grep -nE 'error:|fatal:|undefined reference' build.log | head -1 | cut -d: -f1)
+          if [ -n "$FIRST_ERROR_LINE" ]; then
+            START=$((FIRST_ERROR_LINE - 20))
+            [ $START -lt 1 ] && START=1
+            END=$((FIRST_ERROR_LINE + 20))
+            sed -n "${START},${END}p" build.log
+          else
+            echo "  [i] No 'error:' pattern found, showing 200 last lines:"
+            tail -200 build.log
+          fi
+          echo ""
+
+          # =============================================================
+          # RETRY dengan -j1 untuk ISOLASI ERROR (biar output tidak campur aduk)
+          # =============================================================
+          echo "======================================================"
+          echo "  RETRY with -j1 to isolate the actual error"
+          echo "======================================================"
+          set +e
+          make -j1 "${MAKE_ARGS[@]}" 2>&1 | tee build-j1.log | tail -100
+          set -e
+
+          echo ""
+          echo "======================================================"
+          echo "  FINAL error extraction from -j1 log"
+          echo "======================================================"
+          grep -nE 'error:|Error [0-9]+|fatal:' build-j1.log | head -30
+
+          exit $BUILD_STATUS
 
       # ================================================================
       # 16. Verify kernel output
