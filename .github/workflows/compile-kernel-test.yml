@@ -600,9 +600,9 @@ jobs:
           echo "[OK] Defconfig ready"
 
       # ================================================================
-      # 13b. Fix VDSO Makefile for Clang compatibility (kernel 4.9)
+      # 13b. Fix VDSO Makefile - force GCC with absolute path
       # ================================================================
-      - name: "Fix VDSO Makefile for Clang"
+      - name: "Fix VDSO Makefile for kernel 4.9"
         run: |
           cd ${{ env.KERNEL_DIR }}
 
@@ -613,35 +613,59 @@ jobs:
             exit 0
           fi
 
-          echo "[INFO] Original VDSO Makefile:"
-          cat "$VDSO_MK"
-          echo ""
-          echo "================================================"
+          # Restore backup dulu kalau ada
+          if [ -f "$VDSO_MK.bak" ]; then
+            cp "$VDSO_MK.bak" "$VDSO_MK"
+            echo "[INFO] Restored VDSO Makefile from backup"
+          else
+            cp "$VDSO_MK" "$VDSO_MK.bak"
+          fi
 
-          # Force VDSO to use GCC (safest for kernel 4.9)
-          if ! grep -q "^# ReSukiSU VDSO fix" "$VDSO_MK"; then
-            python3 <<'PYEOF'
+          # ABSOLUTE path ke GCC toolchain
+          GCC64_ABS="$(cd $(pwd)/../toolchain/gcc64/bin && pwd)"
+          GCC_PREFIX="${GCC64_ABS}/aarch64-linux-android-"
+
+          echo "[INFO] GCC64 absolute path: $GCC64_ABS"
+          echo "[INFO] GCC prefix: $GCC_PREFIX"
+
+          # Verify binaries exist
+          if [ ! -x "${GCC_PREFIX}gcc" ]; then
+            echo "[FAIL] ${GCC_PREFIX}gcc not found or not executable"
+            ls -la "$GCC64_ABS/" | head -20
+            exit 1
+          fi
+
+          if [ ! -x "${GCC_PREFIX}as" ]; then
+            echo "[FAIL] ${GCC_PREFIX}as not found or not executable"
+            exit 1
+          fi
+
+          echo "[OK] GCC binaries verified"
+
+          # Inject override dengan ABSOLUTE path
+          python3 <<PYEOF
           from pathlib import Path
           p = Path("arch/arm64/kernel/vdso/Makefile")
           content = p.read_text()
 
-          # Inject at top: override CC dan AS untuk VDSO
           prepend = (
-              "# ReSukiSU VDSO fix: force GCC for VDSO (Clang IAS incompatible)\n"
-              "override CC := $(CROSS_COMPILE)gcc\n"
-              "override LD := $(CROSS_COMPILE)ld\n"
-              "override AS := $(CROSS_COMPILE)as\n"
+              "# ReSukiSU VDSO fix: force GCC with absolute path\n"
+              "# (Clang IAS incompatible with kernel 4.9 VDSO code)\n"
+              "override CC := ${GCC_PREFIX}gcc\n"
+              "override LD := ${GCC_PREFIX}ld\n"
+              "override AS := ${GCC_PREFIX}as\n"
+              "override OBJCOPY := ${GCC_PREFIX}objcopy\n"
+              "override NM := ${GCC_PREFIX}nm\n"
               "\n"
           )
           content = prepend + content
           p.write_text(content)
-          print("  [OK] VDSO Makefile patched")
+          print("  [OK] VDSO Makefile patched with absolute paths")
           PYEOF
-          fi
 
           echo ""
-          echo "[INFO] Patched VDSO Makefile:"
-          head -10 "$VDSO_MK"
+          echo "[INFO] Patched VDSO Makefile (first 15 lines):"
+          head -15 "$VDSO_MK"
 
       # ================================================================
       # 14. Build kernel
