@@ -1,4 +1,4 @@
-name: 0-compile-kernel-test
+name: 00-compile-kernel-test
 
 on:
   workflow_dispatch:
