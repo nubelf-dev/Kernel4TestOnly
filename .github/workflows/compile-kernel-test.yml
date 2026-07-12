@@ -36,11 +36,15 @@ jobs:
 
       - name: Install build dependencies
         run: |
+          sudo dpkg --add-architecture i386 || true
           sudo apt-get update
           sudo apt-get install -y \
             build-essential bc bison flex libssl-dev libelf-dev \
             python3 python3-pip git curl wget zip unzip ccache \
-            device-tree-compiler libncurses5-dev libmpc-dev
+            device-tree-compiler libncurses5-dev libncursesw5-dev \
+            libncurses-dev libgmp-dev libmpc-dev libmpfr-dev \
+            libtinfo5 libtinfo-dev zstd lz4 rsync pkg-config \
+            gcc-multilib g++-multilib libzstd-dev liblz4-dev
           ccache -M 5G
 
       # ---------- Clang ----------
@@ -101,23 +105,13 @@ jobs:
           restore-keys: ccache-kernel-test-
 
       # ---------- Kernel source ----------
+      # Full/partial clone so git apply --3way has the blobs it needs.
       - name: Clone BaikalOS kernel source
         run: |
-          git clone --depth=1 -b ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_REPO }} kernel
-
-      # ---------- ReSukiSU ----------
-      - name: Integrate ReSukiSU
-        working-directory: kernel
-        run: |
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-
-      - name: Disable KernelSU kprobe hooks (manual hook mode)
-        working-directory: kernel/KernelSU
-        run: |
-          find kernel -type f \( -name "*.c" -o -name "*.h" \) -exec \
-            sed -i 's/^#ifdef CONFIG_KPROBES/#if defined(CONFIG_KPROBES) \&\& 0/g' {} +
+          git clone --filter=blob:none -b ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_REPO }} kernel
 
       # ---------- SUSFS patch ----------
+      # Apply SUSFS *before* ReSukiSU so a failure can be retried on a clean tree.
       - name: Apply SUSFS 2.2.0 patch
         working-directory: kernel
         run: |
@@ -133,7 +127,8 @@ jobs:
             if git apply --3way /tmp/susfs.patch; then
               echo "SUSFS patch applied via 3-way merge."
             else
-              echo "::warning::3-way merge failed, attempting fuzz apply..."
+              echo "::warning::3-way merge failed, resetting changed files and attempting fuzz apply..."
+              git checkout -- .
               patch -p1 --fuzz=3 --no-backup-if-mismatch < /tmp/susfs.patch || true
               if find . -type f \( -name "*.rej" -o -name "*.orig" \) | grep -q .; then
                 echo "::error::SUSFS patch has unresolved rejects. Inspect the files below:"
@@ -144,6 +139,18 @@ jobs:
             fi
           fi
           find . -type f -name "*.orig" -delete
+
+      # ---------- ReSukiSU ----------
+      - name: Integrate ReSukiSU
+        working-directory: kernel
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+
+      - name: Disable KernelSU kprobe hooks (manual hook mode)
+        working-directory: kernel/KernelSU
+        run: |
+          find kernel -type f \( -name "*.c" -o -name "*.h" \) -exec \
+            sed -i 's/^#ifdef CONFIG_KPROBES/#if defined(CONFIG_KPROBES) \&\& 0/g' {} +
 
       # ---------- Defconfig ----------
       - name: Copy extracted defconfig
