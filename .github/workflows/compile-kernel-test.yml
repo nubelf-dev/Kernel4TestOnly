@@ -278,7 +278,6 @@ jobs:
 
           # ================================================================
           # STEP 1: Auto-generate include/linux/susfs_extern.h
-          # Extract SEMUA DEFINE_STATIC_KEY_* dari fs/susfs.c
           # ================================================================
           if [ -f fs/susfs.c ]; then
             echo "[INFO] Generating include/linux/susfs_extern.h from fs/susfs.c..."
@@ -292,8 +291,7 @@ jobs:
           static_keys_true = re.findall(r'DEFINE_STATIC_KEY_TRUE\s*\(\s*(\w+)\s*\)', src)
           static_keys_false = re.findall(r'DEFINE_STATIC_KEY_FALSE\s*\(\s*(\w+)\s*\)', src)
 
-          # Extract function definitions yang mungkin dipakai di file lain
-          # Pattern: return_type name(params) diikuti { di baris berikutnya
+          # Extract function definitions
           funcs = []
           for m in re.finditer(
               r'^(?:__\w+\s+)?(bool|void|int|struct\s+\w+\s*\*?)\s+(susfs_\w+)\s*\(([^)]*)\)\s*\{',
@@ -304,7 +302,7 @@ jobs:
               params = m.group(3).strip()
               funcs.append((rettype, name, params))
 
-          # Build header
+          # Build header dengan forward declarations
           header = [
               '/* Auto-generated SUSFS extern header */',
               '#ifndef __SUSFS_EXTERN_H',
@@ -312,6 +310,23 @@ jobs:
               '',
               '#include <linux/types.h>',
               '#include <linux/jump_label.h>',
+              '',
+              '/* Forward declarations - HARUS sebelum extern functions */',
+              'struct inode;',
+              'struct kstat;',
+              'struct path;',
+              'struct dentry;',
+              'struct file;',
+              'struct filename;',
+              'struct vfsmount;',
+              'struct super_block;',
+              'struct mount;',
+              'struct seq_file;',
+              'struct task_struct;',
+              'struct vm_area_struct;',
+              'struct mm_struct;',
+              'struct pt_regs;',
+              'struct linux_binprm;',
               '',
               '/* ==== Static keys (from fs/susfs.c) ==== */',
           ]
@@ -340,13 +355,14 @@ jobs:
           print("  [OK] Generated {} static keys + {} functions".format(
               len(static_keys_true) + len(static_keys_false), len(seen)))
           print("")
-          print("== Contents of include/linux/susfs_extern.h ==")
-          print(out.read_text())
+          print("== First 50 lines of susfs_extern.h ==")
+          for line in out.read_text().split('\n')[:50]:
+              print(line)
           PYEOF
           fi
 
           # ================================================================
-          # STEP 2: Fix proc_namespace.c include
+          # STEP 2: Fix proc_namespace.c include susfs_def.h
           # ================================================================
           if [ -f fs/proc_namespace.c ] && ! grep -q "susfs_def.h" fs/proc_namespace.c; then
             sed -i '/#include "pnode.h"/a\
@@ -387,12 +403,62 @@ jobs:
           fi
 
           # ================================================================
-          # STEP 4: Inject includes + centralized extern header to all SUSFS-touched files
+          # STEP 4: HAPUS extern manual di fs/stat.c dan fs/proc_namespace.c
+          # (sekarang sudah tercover oleh susfs_extern.h)
+          # ================================================================
+          python3 <<'PYEOF'
+          from pathlib import Path
+          import re
+
+          # File yang mungkin punya extern manual dari step lama
+          files_with_manual_extern = [
+              "fs/stat.c",
+              "fs/proc_namespace.c",
+          ]
+
+          for filepath in files_with_manual_extern:
+              p = Path(filepath)
+              if not p.exists():
+                  continue
+              text = p.read_text()
+
+              # Hapus block manual extern SUSFS:
+              # #ifdef CONFIG_KSU_SUSFS_...
+              # extern <something> susfs_...
+              # #endif
+              new_text = re.sub(
+                  r'\n#ifdef CONFIG_KSU_SUSFS[^\n]*\n'
+                  r'(?:extern [^\n]*susfs_[^\n]*\n)+'
+                  r'#endif\n',
+                  '\n',
+                  text
+              )
+
+              # Juga hapus standalone extern susfs_xxx lines
+              lines = new_text.split('\n')
+              cleaned = []
+              for line in lines:
+                  # Skip standalone extern susfs_xxx yang bukan bagian dari struct
+                  stripped = line.strip()
+                  if stripped.startswith('extern ') and 'susfs_' in stripped and stripped.endswith(';'):
+                      # Skip - sudah ada di susfs_extern.h
+                      continue
+                  cleaned.append(line)
+              new_text = '\n'.join(cleaned)
+
+              if new_text != text:
+                  p.write_text(new_text)
+                  print("  [OK] Removed manual SUSFS externs from {}".format(filepath))
+              else:
+                  print("  [SKIP] No manual SUSFS externs to remove in {}".format(filepath))
+          PYEOF
+
+          # ================================================================
+          # STEP 5: Inject includes + centralized extern header ke semua SUSFS files
           # ================================================================
           python3 <<'PYEOF'
           from pathlib import Path
 
-          # File yang dipatch SUSFS
           susfs_files = [
               "fs/open.c",
               "fs/stat.c",
@@ -419,7 +485,6 @@ jobs:
               text = p.read_text()
               lines = text.split('\n')
 
-              # Cek include mana yang sudah ada
               missing = []
               for inc in required_includes:
                   inc_name = inc.split('<')[1].split('>')[0]
@@ -429,7 +494,6 @@ jobs:
               if not missing:
                   continue
 
-              # Cari insertion point (setelah #include pertama)
               insert_idx = -1
               for i, line in enumerate(lines):
                   if line.strip().startswith('#include'):
@@ -444,7 +508,7 @@ jobs:
           PYEOF
 
           # ================================================================
-          # STEP 5: Cleanup duplicate EXPORT_SYMBOL block di fs/stat.c
+          # STEP 6: Cleanup duplicate EXPORT_SYMBOL block di fs/stat.c
           # ================================================================
           if [ -f fs/stat.c ] && grep -q "^EXPORT_SYMBOL(vfs_getattr_nosec);$" fs/stat.c; then
             python3 <<'PYEOF'
@@ -473,27 +537,25 @@ jobs:
           fi
 
           # ================================================================
-          # STEP 6: Verifikasi
+          # STEP 7: Verifikasi
           # ================================================================
           echo ""
           echo "== Verifikasi susfs_extern.h =="
           if [ -f include/linux/susfs_extern.h ]; then
             echo "  [OK] Header exists ($(wc -l < include/linux/susfs_extern.h) lines)"
-            echo "  Static keys defined:"
-            grep -c "^extern struct static_key" include/linux/susfs_extern.h || echo "    0"
-            echo "  Functions declared:"
-            grep -c "^extern " include/linux/susfs_extern.h | head -1
+            echo "  Static keys defined: $(grep -c '^extern struct static_key' include/linux/susfs_extern.h)"
+            echo "  Functions declared: $(grep -c '^extern ' include/linux/susfs_extern.h)"
           else
             echo "  [FAIL] Header NOT generated"
           fi
 
           echo ""
-          echo "== Verifikasi includes di semua SUSFS files =="
-          for f in fs/open.c fs/stat.c fs/proc_namespace.c fs/proc/task_mmu.c fs/proc/cmdline.c fs/read_write.c fs/namespace.c; do
+          echo "== Verifikasi tidak ada duplicate extern di file2 =="
+          for f in fs/open.c fs/stat.c fs/proc_namespace.c fs/proc/task_mmu.c fs/proc/cmdline.c; do
             [ -f "$f" ] || continue
-            HAS_EXTERN=$(grep -c "susfs_extern.h" "$f" 2>/dev/null || echo 0)
-            HAS_SUSFS=$(grep -c "linux/susfs.h" "$f" 2>/dev/null || echo 0)
-            echo "  $f -> susfs_extern.h:$HAS_EXTERN, susfs.h:$HAS_SUSFS"
+            MANUAL_EXTERNS=$(grep -c "^extern.*susfs_" "$f" 2>/dev/null || echo 0)
+            HAS_HEADER=$(grep -c "susfs_extern.h" "$f" 2>/dev/null || echo 0)
+            echo "  $f -> manual_externs:$MANUAL_EXTERNS, has_header:$HAS_HEADER"
           done
 
           echo ""
@@ -870,7 +932,9 @@ jobs:
           echo "======================================================"
           echo "  FINAL error extraction from -j1 log"
           echo "======================================================"
-          grep -nE 'error:|Error [0-9]+|fatal:' build-j1.log | head -30
+          if [ -f build-j1.log ]; then
+            grep -nE 'error:|Error [0-9]+|fatal:' build-j1.log | head -30
+          fi
 
           exit $BUILD_STATUS
 
