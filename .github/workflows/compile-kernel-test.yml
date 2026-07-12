@@ -631,16 +631,24 @@ jobs:
           arm-linux-androideabi-gcc --version 2>/dev/null | head -1 || echo "gcc32 not found"
           echo ""
 
-          # Masuk ke direktori kernel
+          # Masuk ke folder kernel
           cd ${{ env.KERNEL_DIR }}
 
-          # [Trik Khusus VDSO]
-          # Mengganti CC dan LD di Makefile khusus vdso agar menggunakan GCC
-          # agar error "junk at end of line" hilang selamanya.
-          if [ -f arch/arm64/kernel/vdso/Makefile ]; then
-            echo "[INFO] Patching VDSO Makefile untuk menggunakan GCC..."
-            sed -i 's|CC := $(CC)|CC := $(CROSS_COMPILE)gcc|g' arch/arm64/kernel/vdso/Makefile
-            sed -i 's|LD := $(LD)|LD := $(CROSS_COMPILE)ld|g' arch/arm64/kernel/vdso/Makefile
+          # 1. Hapus paksa Integrated Assembler dari Makefile vdso
+          # Kita memaksa VDSO menggunakan GNU Assembler (aarch64-linux-android-as)
+          
+          echo "[INFO] Memaksa VDSO menggunakan GNU Assembler..."
+          
+          # Cari file Makefile di vdso
+          VDSO_MAKEFILE="arch/arm64/kernel/vdso/Makefile"
+          
+          # Jika file ada, kita akan memodifikasi flag-nya
+          if [ -f "$VDSO_MAKEFILE" ]; then
+              # Menambahkan AS sebagai aarch64-linux-android-as
+              echo "AS := aarch64-linux-android-as" >> $VDSO_MAKEFILE
+              
+              # Memastikan flag -integrated-as dihapus dari CFLAGS vdso
+              sed -i 's|-integrated-as||g' $VDSO_MAKEFILE
           fi
 
           # Definisi Argument Build (Kembali ke mode Clang penuh)
