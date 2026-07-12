@@ -600,72 +600,55 @@ jobs:
           echo "[OK] Defconfig ready"
 
       # ================================================================
-      # 13b. Fix VDSO Makefile - force GCC with absolute path
+      # 13b. Fix VDSO for Clang - patch vgettimeofday.c
       # ================================================================
-      - name: "Fix VDSO Makefile for kernel 4.9"
+      - name: "Fix VDSO for Clang IAS"
         run: |
           cd ${{ env.KERNEL_DIR }}
 
           VDSO_MK="arch/arm64/kernel/vdso/Makefile"
+          VDSO_C="arch/arm64/kernel/vdso/vgettimeofday.c"
 
-          if [ ! -f "$VDSO_MK" ]; then
-            echo "[SKIP] VDSO Makefile not found"
-            exit 0
-          fi
-
-          # Restore backup dulu kalau ada
+          # Restore Makefile ke original
           if [ -f "$VDSO_MK.bak" ]; then
             cp "$VDSO_MK.bak" "$VDSO_MK"
             echo "[INFO] Restored VDSO Makefile from backup"
-          else
-            cp "$VDSO_MK" "$VDSO_MK.bak"
           fi
 
-          # ABSOLUTE path ke GCC toolchain
-          GCC64_ABS="$(cd $(pwd)/../toolchain/gcc64/bin && pwd)"
-          GCC_PREFIX="${GCC64_ABS}/aarch64-linux-android-"
-
-          echo "[INFO] GCC64 absolute path: $GCC64_ABS"
-          echo "[INFO] GCC prefix: $GCC_PREFIX"
-
-          # Verify binaries exist
-          if [ ! -x "${GCC_PREFIX}gcc" ]; then
-            echo "[FAIL] ${GCC_PREFIX}gcc not found or not executable"
-            ls -la "$GCC64_ABS/" | head -20
-            exit 1
-          fi
-
-          if [ ! -x "${GCC_PREFIX}as" ]; then
-            echo "[FAIL] ${GCC_PREFIX}as not found or not executable"
-            exit 1
-          fi
-
-          echo "[OK] GCC binaries verified"
-
-          # Inject override dengan ABSOLUTE path
-          python3 <<PYEOF
+          # Patch Makefile: tambah -Wa,-mno-warn-deprecated-file untuk clang IAS
+          # Dan force -no-integrated-as untuk file yang bermasalah
+          if [ -f "$VDSO_MK" ] && ! grep -q "no-integrated-as" "$VDSO_MK"; then
+            python3 <<'PYEOF'
           from pathlib import Path
           p = Path("arch/arm64/kernel/vdso/Makefile")
           content = p.read_text()
 
-          prepend = (
-              "# ReSukiSU VDSO fix: force GCC with absolute path\n"
-              "# (Clang IAS incompatible with kernel 4.9 VDSO code)\n"
-              "override CC := ${GCC_PREFIX}gcc\n"
-              "override LD := ${GCC_PREFIX}ld\n"
-              "override AS := ${GCC_PREFIX}as\n"
-              "override OBJCOPY := ${GCC_PREFIX}objcopy\n"
-              "override NM := ${GCC_PREFIX}nm\n"
+          # Tambah flag untuk disable integrated assembler khusus VDSO
+          insertion = (
               "\n"
+              "# ReSukiSU: disable integrated assembler for VDSO (Clang IAS incompatible)\n"
+              "CFLAGS_vgettimeofday.o += -fno-integrated-as -Wa,--noexecstack\n"
+              "AFLAGS_sigreturn.o += -fno-integrated-as\n"
+              "AFLAGS_note.o += -fno-integrated-as\n"
           )
-          content = prepend + content
+
+          # Insert setelah baris "CFLAGS_vgettimeofday.o = -O2 -fPIC"
+          if 'CFLAGS_vgettimeofday.o = -O2 -fPIC' in content:
+              content = content.replace(
+                  'CFLAGS_vgettimeofday.o = -O2 -fPIC',
+                  'CFLAGS_vgettimeofday.o = -O2 -fPIC' + insertion
+              )
+          else:
+              # Fallback: append di akhir
+              content += insertion
           p.write_text(content)
-          print("  [OK] VDSO Makefile patched with absolute paths")
+          print("  [OK] VDSO Makefile patched with -fno-integrated-as")
           PYEOF
+          fi
 
           echo ""
-          echo "[INFO] Patched VDSO Makefile (first 15 lines):"
-          head -15 "$VDSO_MK"
+          echo "[INFO] Patched VDSO Makefile:"
+          cat "$VDSO_MK"
 
       # ================================================================
       # 14. Build kernel
