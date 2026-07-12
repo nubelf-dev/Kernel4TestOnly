@@ -609,57 +609,137 @@ jobs:
           echo ""
           echo "[OK] Defconfig ready"
 
+      - name: Patch arch/arm64/Makefile (fix clang vdso32 "-EL" assembler error)
+        run: |
+          cd kernel-src
+          MAIN_MK="arch/arm64/Makefile"
+
+          if [ ! -f "$MAIN_MK" ]; then
+            echo "ERROR: $MAIN_MK tidak ditemukan!"
+            exit 1
+          fi
+
+          echo "== Cari blok CLANG_PREFIX32 / GCC_TOOLCHAIN32 di $MAIN_MK =="
+          grep -n "CLANG_PREFIX32\|GCC_TOOLCHAIN32\|CLANG_TARGET_ARM32\|CLANG_GCC32_TC" "$MAIN_MK" || echo "TIDAK DITEMUKAN sama sekali!"
+
+          cp "$MAIN_MK" "$MAIN_MK.orig"
+
+          # Fix resmi: arm64: vdso32: Fix '--prefix=' value for newer versions of clang
+          # https://github.com/ClangBuiltLinux/linux/issues/1099
+          # CLANG_PREFIX32 harus menyertakan nama prefix CROSS_COMPILE_ARM32, bukan cuma direktorinya.
+          # Pattern asli biasanya:
+          #   export CLANG_PREFIX32 := --prefix=$(GCC_TOOLCHAIN32_DIR)
+          # diubah jadi:
+          #   export CLANG_PREFIX32 := --prefix=$(GCC_TOOLCHAIN32_DIR)$(notdir $(CROSS_COMPILE_ARM32))
+          sed -i -E \
+            's@(CLANG_PREFIX32[[:space:]]*:=[[:space:]]*--prefix=\$\(GCC_TOOLCHAIN32_DIR\))[[:space:]]*$@\1$(notdir $(CROSS_COMPILE_ARM32))@' \
+            "$MAIN_MK"
+
+          if ! diff -q "$MAIN_MK" "$MAIN_MK.orig" > /dev/null; then
+            echo "[OK] Patch CLANG_PREFIX32 berhasil diterapkan."
+            echo "== Baris setelah patch =="
+            grep -n "CLANG_PREFIX32" "$MAIN_MK"
+          else
+            echo "[PERINGATAN] Pattern CLANG_PREFIX32 tidak match/tidak berubah."
+            echo "Menampilkan 15 baris di sekitar definisi CLANG_PREFIX32 untuk diperiksa manual:"
+            grep -n -B5 -A10 "CLANG_TARGET_ARM32\|CLANG_PREFIX32" "$MAIN_MK" || true
+          fi
+
+          rm -f "$MAIN_MK.orig"
+
+      - name: Skip DTB yang tidak relevan/rusak (QVR headset, interposer SDM670)
+        run: |
+          cd kernel-src
+          DTS_MK="arch/arm64/boot/dts/qcom/Makefile"
+
+          if [ ! -f "$DTS_MK" ]; then
+            echo "PERINGATAN: $DTS_MK tidak ditemukan, skip step ini."
+            exit 0
+          fi
+
+          # 4 dtb ini BUKAN untuk Poco F1/beryllium (QVR = Qualcomm VR reference headset,
+          # interposer-sdm670 = board test interposer), dan rusak (phandle reference hilang)
+          # di kernel source ini. Kita hapus dari daftar build supaya target `dtbs`
+          # (yang menjadi dependency Image.gz-dtb) bisa sukses sepenuhnya.
+          BROKEN_DTBS=(
+            "sdm845-v2-qvr-evt.dtb"
+            "sdm845-v2-qvr-dvt.dtb"
+            "sdm845-interposer-sdm670-mtp.dtb"
+            "sdm845-interposer-sdm670-cdp.dtb"
+          )
+
+          cp "$DTS_MK" "$DTS_MK.orig"
+
+          for dtb in "${BROKEN_DTBS[@]}"; do
+            if grep -q "$dtb" "$DTS_MK"; then
+              sed -i "/$dtb/d" "$DTS_MK"
+              echo "[OK] Baris untuk $dtb dihapus dari $DTS_MK."
+            else
+              echo "[INFO] $dtb tidak ditemukan di $DTS_MK (mungkin sudah tidak ada / nama beda)."
+            fi
+          done
+
+          echo "== Diff perubahan =="
+          diff "$DTS_MK.orig" "$DTS_MK" || true
+
+          rm -f "$DTS_MK.orig"      
+      
       # ================================================================
       # 14. Build Kernel
       # ================================================================
       - name: Build kernel
         run: |
-          # Definisikan path absolut toolchain
+          # Path absolut toolchain
           CLANG_DIR="$GITHUB_WORKSPACE/toolchain/clang"
           GCC64_DIR="$GITHUB_WORKSPACE/toolchain/gcc64"
           GCC32_DIR="$GITHUB_WORKSPACE/toolchain/gcc32"
 
-          # Export PATH agar compiler terdeteksi
+          # Setup PATH
           export PATH="${CLANG_DIR}/bin:${GCC64_DIR}/bin:${GCC32_DIR}/bin:${PATH}"
           
-          # Konfigurasi Environment
+          # Konfigurasi Env
           export ARCH=arm64
           export SUBARCH=arm64
           export KBUILD_BUILD_USER="${{ env.KBUILD_BUILD_USER }}"
           export KBUILD_BUILD_HOST="${{ env.KBUILD_BUILD_HOST }}"
-
-          # Optimasi dengan Ccache
           export USE_CCACHE=1
           export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
-          
-          # Pastikan toolchain bisa dieksekusi
-          echo "[INFO] Memberikan izin eksekusi..."
-          chmod -R +x ${CLANG_DIR}/bin ${GCC64_DIR}/bin ${GCC32_DIR}/bin || true
 
           # Masuk ke kernel
           cd ${{ env.KERNEL_DIR }}
 
-          # Patch VDSO (Penting untuk Clang 17)
-          # Menghapus flag integrated-as dan memaksa GNU Assembler
-          if [ -f arch/arm64/kernel/vdso/Makefile ]; then
-            sed -i 's|-integrated-as||g' arch/arm64/kernel/vdso/Makefile
-            echo "AS := aarch64-linux-android-as" >> arch/arm64/kernel/vdso/Makefile
+          # 1. Patch CLANG_PREFIX32 (untuk fix vdso32 assembler error)
+          MAIN_MK="arch/arm64/Makefile"
+          if [ -f "$MAIN_MK" ]; then
+            echo "[INFO] Applying CLANG_PREFIX32 patch..."
+            sed -i -E 's@(CLANG_PREFIX32[[:space:]]*:=[[:space:]]*--prefix=\$\(GCC_TOOLCHAIN32_DIR\))[[:space:]]*$@\1$(notdir $(CROSS_COMPILE_ARM32))@' "$MAIN_MK"
           fi
 
-          # Definisi Argumen Build
+          # 2. Patch VDSO Makefile (hapus -integrated-as & paksa GNU Assembler)
+          if [ -f arch/arm64/kernel/vdso/Makefile ]; then
+            echo "[INFO] Patching VDSO Makefile..."
+            sed -i 's|-integrated-as||g' arch/arm64/kernel/vdso/Makefile
+            if ! grep -q "aarch64-linux-android-as" arch/arm64/kernel/vdso/Makefile; then
+              echo "AS := aarch64-linux-android-as" >> arch/arm64/kernel/vdso/Makefile
+            fi
+          fi
+
+          # Izin eksekusi
+          chmod -R +x ${CLANG_DIR}/bin ${GCC64_DIR}/bin ${GCC32_DIR}/bin
+
+          # Argumen Build
           MAKE_ARGS=(
             -j$(nproc --all)
             O=out
             ARCH=arm64
             CC="ccache clang"
-            LD=ld.bfd
             CLANG_TRIPLE=aarch64-linux-gnu-
             CROSS_COMPILE=aarch64-linux-android-
             CROSS_COMPILE_ARM32=arm-linux-androideabi-
             LLVM_IAS=0
           )
 
-          # Eksekusi Build
+          # Eksekusi
           echo "[INFO] Starting compilation..."
           make "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG_NAME }}
           make "${MAKE_ARGS[@]}"
