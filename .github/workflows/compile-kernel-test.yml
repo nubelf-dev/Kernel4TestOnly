@@ -600,6 +600,50 @@ jobs:
           echo "[OK] Defconfig ready"
 
       # ================================================================
+      # 13b. Fix VDSO Makefile for Clang compatibility (kernel 4.9)
+      # ================================================================
+      - name: "Fix VDSO Makefile for Clang"
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+
+          VDSO_MK="arch/arm64/kernel/vdso/Makefile"
+
+          if [ ! -f "$VDSO_MK" ]; then
+            echo "[SKIP] VDSO Makefile not found"
+            exit 0
+          fi
+
+          echo "[INFO] Original VDSO Makefile:"
+          cat "$VDSO_MK"
+          echo ""
+          echo "================================================"
+
+          # Force VDSO to use GCC (safest for kernel 4.9)
+          if ! grep -q "^# ReSukiSU VDSO fix" "$VDSO_MK"; then
+            python3 <<'PYEOF'
+          from pathlib import Path
+          p = Path("arch/arm64/kernel/vdso/Makefile")
+          content = p.read_text()
+
+          # Inject at top: override CC dan AS untuk VDSO
+          prepend = (
+              "# ReSukiSU VDSO fix: force GCC for VDSO (Clang IAS incompatible)\n"
+              "override CC := $(CROSS_COMPILE)gcc\n"
+              "override LD := $(CROSS_COMPILE)ld\n"
+              "override AS := $(CROSS_COMPILE)as\n"
+              "\n"
+          )
+          content = prepend + content
+          p.write_text(content)
+          print("  [OK] VDSO Makefile patched")
+          PYEOF
+          fi
+
+          echo ""
+          echo "[INFO] Patched VDSO Makefile:"
+          head -10 "$VDSO_MK"
+
+      # ================================================================
       # 14. Build kernel
       # ================================================================
       - name: Build kernel
@@ -620,13 +664,22 @@ jobs:
           clang --version 2>/dev/null | head -1 || echo "clang not found"
           aarch64-linux-android-gcc --version 2>/dev/null | head -1 || echo "gcc64 not found"
           arm-linux-androideabi-gcc --version 2>/dev/null | head -1 || echo "gcc32 not found"
+          aarch64-linux-android-as --version 2>/dev/null | head -1 || echo "as not found"
           echo ""
 
           MAKE_ARGS=(
             -j$(nproc --all)
             O=out
             ARCH=arm64
+            LLVM_IAS=0
             CC=clang
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            AS=aarch64-linux-android-as
             CLANG_TRIPLE=aarch64-linux-gnu-
             CROSS_COMPILE=aarch64-linux-android-
             CROSS_COMPILE_ARM32=arm-linux-androideabi-
@@ -641,11 +694,21 @@ jobs:
           echo "================================================"
           echo "  Compiling kernel..."
           echo "================================================"
-          make "${MAKE_ARGS[@]}" 2>&1 | tail -100
+          make "${MAKE_ARGS[@]}" 2>&1 | tee build.log | tail -150
+
+          BUILD_STATUS=${PIPESTATUS[0]}
 
           echo ""
           echo "================================================"
-          echo "  Build completed"
+          if [ $BUILD_STATUS -eq 0 ]; then
+            echo "  [OK] Build completed successfully"
+          else
+            echo "  [FAIL] Build failed with exit code $BUILD_STATUS"
+            echo ""
+            echo "== Last 100 lines of build log =="
+            tail -100 build.log
+            exit $BUILD_STATUS
+          fi
           echo "================================================"
 
       # ================================================================
