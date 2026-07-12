@@ -47,6 +47,13 @@ jobs:
         with:
           path: repo
 
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-kernel-${{ github.sha }}
+          restore-keys: ccache-kernel-
+      
       # ================================================================
       # 2. Install dependencies
       # ================================================================
@@ -56,12 +63,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential ccache curl flex \
             git gnupg gperf imagemagick lib32readline-dev \
-            lib32z1-dev libelf-dev liblz4-tool libncurses5-dev \
-            libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
-            lzop pngcrush rsync schedtool squashfs-tools \
-            xsltproc zip zlib1g-dev python3 python-is-python3 \
-            cpio kmod
-
+            lib32z1-dev libelf-dev liblz4-tool libncurses-dev \
+            libncurses5-dev libsdl1.2-dev libssl-dev libxml2 \
+            libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev \
+            python3 python-is-python3 cpio kmod \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            ca-certificates
       # ================================================================
       # 3. Cache Clang toolchain
       # ================================================================
@@ -620,65 +628,40 @@ jobs:
           export KBUILD_BUILD_USER="${{ env.KBUILD_BUILD_USER }}"
           export KBUILD_BUILD_HOST="${{ env.KBUILD_BUILD_HOST }}"
 
+          # Optimasi dengan Ccache
+          export USE_CCACHE=1
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          
           # Pastikan toolchain bisa dieksekusi
           echo "[INFO] Memberikan izin eksekusi..."
           chmod -R +x ${CLANG_DIR}/bin ${GCC64_DIR}/bin ${GCC32_DIR}/bin || true
 
-          # Verifikasi Compiler
-          echo "[INFO] Toolchain versions:"
-          clang --version 2>/dev/null | head -1 || echo "clang not found"
-          aarch64-linux-android-gcc --version 2>/dev/null | head -1 || echo "gcc64 not found"
-          arm-linux-androideabi-gcc --version 2>/dev/null | head -1 || echo "gcc32 not found"
-          echo ""
-
-          # Masuk ke folder kernel
+          # Masuk ke kernel
           cd ${{ env.KERNEL_DIR }}
 
-          # 1. Hapus paksa Integrated Assembler dari Makefile vdso
-          # Kita memaksa VDSO menggunakan GNU Assembler (aarch64-linux-android-as)
-          
-          echo "[INFO] Memaksa VDSO menggunakan GNU Assembler..."
-          
-          # Cari file Makefile di vdso
-          VDSO_MAKEFILE="arch/arm64/kernel/vdso/Makefile"
-          
-          # Jika file ada, kita akan memodifikasi flag-nya
-          if [ -f "$VDSO_MAKEFILE" ]; then
-              # Menambahkan AS sebagai aarch64-linux-android-as
-              echo "AS := aarch64-linux-android-as" >> $VDSO_MAKEFILE
-              
-              # Memastikan flag -integrated-as dihapus dari CFLAGS vdso
-              sed -i 's|-integrated-as||g' $VDSO_MAKEFILE
+          # Patch VDSO (Penting untuk Clang 17)
+          # Menghapus flag integrated-as dan memaksa GNU Assembler
+          if [ -f arch/arm64/kernel/vdso/Makefile ]; then
+            sed -i 's|-integrated-as||g' arch/arm64/kernel/vdso/Makefile
+            echo "AS := aarch64-linux-android-as" >> arch/arm64/kernel/vdso/Makefile
           fi
 
-          # Definisi Argument Build (Kembali ke mode Clang penuh)
+          # Definisi Argumen Build
           MAKE_ARGS=(
             -j$(nproc --all)
             O=out
             ARCH=arm64
-            CC=clang
+            CC="ccache clang"
             CLANG_TRIPLE=aarch64-linux-gnu-
             CROSS_COMPILE=aarch64-linux-android-
             CROSS_COMPILE_ARM32=arm-linux-androideabi-
-            # Tidak perlu LLVM_IAS=0 jika sudah dipatch via sed, 
-            # tapi tidak apa-apa jika ingin tetap dipasang.
+            LLVM_IAS=0
           )
-          echo "================================================"
-          echo "  Building defconfig: ${{ env.DEFCONFIG_NAME }}"
-          echo "================================================"
+
+          # Eksekusi Build
+          echo "[INFO] Starting compilation..."
           make "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG_NAME }}
-
-          echo ""
-          echo "================================================"
-          echo "  Compiling kernel..."
-          echo "================================================"
-          # Jalankan tanpa tail agar jika error, log bisa terlihat utuh
           make "${MAKE_ARGS[@]}"
-
-          echo ""
-          echo "================================================"
-          echo "  Build completed"
-          echo "================================================"
 
       # ================================================================
       # 15. Verify kernel output
