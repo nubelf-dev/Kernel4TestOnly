@@ -238,45 +238,6 @@ jobs:
             echo "[OK] No reject files"
           fi
 
-      - name: "DEBUG - Investigate current state"
-        run: |
-          cd ${{ env.KERNEL_DIR }}
-
-          echo "======================================================"
-          echo "  1. Lihat fs/proc/cmdline.c baris 30-50"
-          echo "======================================================"
-          sed -n '25,55p' fs/proc/cmdline.c
-
-          echo ""
-          echo "======================================================"
-          echo "  2. Cari definisi susfs_show_vfsmnt, susfs_show_mountinfo, susfs_show_vfsstat"
-          echo "======================================================"
-          grep -rn "susfs_show_vfsmnt\|susfs_show_mountinfo\|susfs_show_vfsstat" \
-            fs/ include/ 2>/dev/null | head -20
-
-          echo ""
-          echo "======================================================"
-          echo "  3. Cek apakah static di source"
-          echo "======================================================"
-          grep -B 1 "susfs_show_vfsmnt\|susfs_show_mountinfo\|susfs_show_vfsstat" \
-            fs/susfs.c 2>/dev/null | head -20
-
-          echo ""
-          echo "======================================================"
-          echo "  4. Lihat fs/open.c manual_externs (masih 1)"
-          echo "======================================================"
-          grep -n "^extern.*susfs_" fs/open.c 2>/dev/null | head -5
-
-          echo ""
-          echo "======================================================"
-          echo "  5. Cek isi susfs_extern.h yang lengkap"
-          echo "======================================================"
-          wc -l include/linux/susfs_extern.h
-          echo ""
-          echo "-- Semua extern function --"
-          grep "^extern " include/linux/susfs_extern.h | wc -l
-          grep "^extern " include/linux/susfs_extern.h | tail -20
-      
       # ================================================================
       # 8. Manual fix SUSFS hunks
       # ================================================================
@@ -286,181 +247,8 @@ jobs:
 
           # ================================================================
           # STEP 1: Auto-generate include/linux/susfs_extern.h
-          # PENTING: Scan static functions juga (untuk callback yang dipakai lintas file)
           # ================================================================
-          echo "[INFO] Generating include/linux/susfs_extern.h from ALL SUSFS sources..."
-          python3 <<'PYEOF'
-          import re
-          from pathlib import Path
-          import glob
-
-          # Scan file source
-          source_files = []
-          for pattern in ["fs/susfs.c", "fs/susfs_*.c",
-                          "include/linux/susfs.h", "include/linux/susfs_def.h"]:
-              for f in glob.glob(pattern):
-                  source_files.append(Path(f))
-
-          # Scan KernelSU juga
-          for pattern in ["KernelSU/kernel/*.c", "KernelSU/kernel/*.h",
-                          "KernelSU/kernel/**/*.c", "KernelSU/kernel/**/*.h",
-                          "drivers/kernelsu/*.c", "drivers/kernelsu/*.h"]:
-              for f in glob.glob(pattern, recursive=True):
-                  source_files.append(Path(f))
-
-          print("[INFO] Scanning {} source files".format(len(source_files)))
-
-          static_keys_true = set()
-          static_keys_false = set()
-          funcs = {}   # name -> (rettype, params, is_static)
-
-          for f in source_files:
-              try:
-                  text = f.read_text(errors='replace')
-              except Exception:
-                  continue
-
-              # Static keys
-              for name in re.findall(r'DEFINE_STATIC_KEY_TRUE\s*\(\s*(\w+)\s*\)', text):
-                  static_keys_true.add(name)
-              for name in re.findall(r'DEFINE_STATIC_KEY_FALSE\s*\(\s*(\w+)\s*\)', text):
-                  static_keys_false.add(name)
-
-              # Function definitions - SCAN semua, static or not
-              for m in re.finditer(
-                  r'^(static\s+)?(?:__\w+\s+)?(?:inline\s+)?(bool|void|int|long|unsigned\s+\w+|struct\s+\w+\s*\*?)\s+(susfs_\w+|ksu_\w+)\s*\(([^)]*)\)\s*\{',
-                  text, re.MULTILINE
-              ):
-                  is_static = m.group(1) is not None
-                  rettype = m.group(2).strip()
-                  name = m.group(3)
-                  params = m.group(4).strip()
-
-                  # Only track susfs_ (not ksu_)
-                  if not name.startswith('susfs_'):
-                      continue
-
-                  # Priority: non-static definition wins
-                  if name in funcs and not funcs[name][2]:
-                      continue
-                  funcs[name] = (rettype, params, is_static)
-
-              # Prototypes / declarations di header
-              for m in re.finditer(
-                  r'^(?:extern\s+)?(bool|void|int|long|unsigned\s+\w+|struct\s+\w+\s*\*?)\s+(susfs_\w+)\s*\(([^)]*)\)\s*;',
-                  text, re.MULTILINE
-              ):
-                  rettype = m.group(1).strip()
-                  name = m.group(2)
-                  params = m.group(3).strip()
-                  if name not in funcs:
-                      funcs[name] = (rettype, params, False)
-
-          # Build header
-          header = [
-              '/* Auto-generated SUSFS extern header */',
-              '#ifndef __SUSFS_EXTERN_H',
-              '#define __SUSFS_EXTERN_H',
-              '',
-              '#include <linux/types.h>',
-              '#include <linux/jump_label.h>',
-              '',
-              '/* Forward declarations */',
-              'struct inode;',
-              'struct kstat;',
-              'struct path;',
-              'struct dentry;',
-              'struct file;',
-              'struct filename;',
-              'struct vfsmount;',
-              'struct super_block;',
-              'struct mount;',
-              'struct seq_file;',
-              'struct task_struct;',
-              'struct vm_area_struct;',
-              'struct mm_struct;',
-              'struct pt_regs;',
-              'struct linux_binprm;',
-              'struct new_utsname;',
-              '',
-              '/* ==== Static keys ==== */',
-          ]
-
-          for name in sorted(static_keys_true):
-              header.append('extern struct static_key_true {};'.format(name))
-          for name in sorted(static_keys_false):
-              header.append('extern struct static_key_false {};'.format(name))
-
-          header.append('')
-          header.append('/* ==== Function declarations ==== */')
-
-          static_count = 0
-          extern_count = 0
-          for name in sorted(funcs.keys()):
-              rettype, params, is_static = funcs[name]
-              if is_static:
-                  # Kalau static, tandai dengan comment - tapi tetap declare sebagai extern
-                  # (karena kalau dipakai lintas file, harus non-static di source aslinya)
-                  header.append('/* NOTE: {} is static in source - may need patch */'.format(name))
-                  header.append('extern {} {}({});'.format(rettype, name, params))
-                  static_count += 1
-              else:
-                  header.append('extern {} {}({});'.format(rettype, name, params))
-                  extern_count += 1
-
-          header.append('')
-          header.append('#endif /* __SUSFS_EXTERN_H */')
-
-          out = Path("include/linux/susfs_extern.h")
-          out.write_text('\n'.join(header))
-
-          print("[OK] Generated header:")
-          print("  Static keys (true):  {}".format(len(static_keys_true)))
-          print("  Static keys (false): {}".format(len(static_keys_false)))
-          print("  Functions (extern):  {}".format(extern_count))
-          print("  Functions (static, may need patch): {}".format(static_count))
-          print("")
-          print("== First 60 lines of susfs_extern.h ==")
-          for line in out.read_text().split('\n')[:60]:
-              print(line)
-          PYEOF
-
-          # ================================================================
-          # STEP 2: Convert 'static' functions ke non-static di fs/susfs.c
-          # (agar bisa dipakai lintas file via extern)
-          # ================================================================
-          echo ""
-          echo "[INFO] Removing 'static' keyword from SUSFS callback functions..."
-          python3 <<'PYEOF'
-          from pathlib import Path
-          import re
-
-          # Function names yang WAJIB non-static (dipakai sebagai callback di file lain)
-          callbacks = [
-              'susfs_show_vfsmnt',
-              'susfs_show_mountinfo',
-              'susfs_show_vfsstat',
-              'susfs_show_map_vma',
-          ]
-
-          for fname_target in callbacks:
-              for filepath in ["fs/susfs.c", "fs/proc_namespace.c", "fs/namespace.c"]:
-                  p = Path(filepath)
-                  if not p.exists():
-                      continue
-                  text = p.read_text()
-
-                  # Ganti "static <type> susfs_xxx" jadi "<type> susfs_xxx"
-                  pattern = r'^static\s+(\w[\w\s*]*?)\s+(' + re.escape(fname_target) + r')\s*\('
-                  new_text, n = re.subn(pattern, r'\1 \2(', text, flags=re.MULTILINE)
-                  if n > 0:
-                      p.write_text(new_text)
-                      print("  [OK] Removed 'static' from {} in {}".format(fname_target, filepath))
-          PYEOF
-
-          # Regenerate header setelah convert
-          echo ""
-          echo "[INFO] Regenerating susfs_extern.h after removing static keyword..."
+          echo "[INFO] Generating include/linux/susfs_extern.h..."
           python3 <<'PYEOF'
           import re
           from pathlib import Path
@@ -475,6 +263,8 @@ jobs:
                           "KernelSU/kernel/**/*.c", "KernelSU/kernel/**/*.h"]:
               for f in glob.glob(pattern, recursive=True):
                   source_files.append(Path(f))
+
+          print("[INFO] Scanning {} source files".format(len(source_files)))
 
           static_keys_true = set()
           static_keys_false = set()
@@ -491,17 +281,32 @@ jobs:
               for name in re.findall(r'DEFINE_STATIC_KEY_FALSE\s*\(\s*(\w+)\s*\)', text):
                   static_keys_false.add(name)
 
+              # Function definitions (skip static)
               for m in re.finditer(
-                  r'^(?:__\w+\s+)?(?:inline\s+)?(bool|void|int|long|unsigned\s+\w+|struct\s+\w+\s*\*?)\s+(susfs_\w+)\s*\(([^)]*)\)\s*\{',
+                  r'^(?:__\w+\s+)?(?:inline\s+)?'
+                  r'(bool|void|int|long|unsigned\s+\w+|struct\s+\w+\s*\*?)\s+'
+                  r'(susfs_\w+)\s*\(([^)]*)\)\s*\{',
                   text, re.MULTILINE
               ):
                   rettype = m.group(1).strip()
                   name = m.group(2)
                   params = m.group(3).strip()
+
+                  # Skip kalau ada "static" di baris yang sama
+                  start = max(0, m.start() - 100)
+                  preamble = text[start:m.start()]
+                  last_newline = preamble.rfind('\n')
+                  same_line = preamble[last_newline:] if last_newline >= 0 else preamble
+                  if 'static' in same_line:
+                      continue
+
                   funcs[name] = (rettype, params)
 
+              # Prototype dari header
               for m in re.finditer(
-                  r'^(?:extern\s+)?(bool|void|int|long|unsigned\s+\w+|struct\s+\w+\s*\*?)\s+(susfs_\w+)\s*\(([^)]*)\)\s*;',
+                  r'^(?:extern\s+)?'
+                  r'(bool|void|int|long|unsigned\s+\w+|struct\s+\w+\s*\*?)\s+'
+                  r'(susfs_\w+)\s*\(([^)]*)\)\s*;',
                   text, re.MULTILINE
               ):
                   rettype = m.group(1).strip()
@@ -535,6 +340,7 @@ jobs:
 
           header.append('')
           header.append('/* ==== Function declarations ==== */')
+
           for name in sorted(funcs.keys()):
               rettype, params = funcs[name]
               header.append('extern {} {}({});'.format(rettype, name, params))
@@ -542,12 +348,17 @@ jobs:
           header.append('')
           header.append('#endif /* __SUSFS_EXTERN_H */')
 
-          Path("include/linux/susfs_extern.h").write_text('\n'.join(header))
-          print("[OK] Regenerated with {} functions".format(len(funcs)))
+          out = Path("include/linux/susfs_extern.h")
+          out.write_text('\n'.join(header))
+
+          print("[OK] Generated:")
+          print("  Static keys (true):  {}".format(len(static_keys_true)))
+          print("  Static keys (false): {}".format(len(static_keys_false)))
+          print("  Functions:           {}".format(len(funcs)))
           PYEOF
 
           # ================================================================
-          # STEP 3: Fix proc_namespace.c include susfs_def.h
+          # STEP 2: Fix proc_namespace.c include
           # ================================================================
           if [ -f fs/proc_namespace.c ] && ! grep -q "susfs_def.h" fs/proc_namespace.c; then
             sed -i '/#include "pnode.h"/a\
@@ -557,7 +368,7 @@ jobs:
           fi
 
           # ================================================================
-          # STEP 4: Fix fs/stat.c sus_kstat hunk
+          # STEP 3: Fix fs/stat.c sus_kstat hunk
           # ================================================================
           if [ -f fs/stat.c ] && ! grep -q "int err = inode->i_op->getattr" fs/stat.c; then
             python3 <<'PYEOF'
@@ -586,20 +397,21 @@ jobs:
           fi
 
           # ================================================================
-          # STEP 5: HAPUS manual extern SUSFS dari semua file
-          # SAFE version - hanya hapus baris yang MURNI extern (bukan gabungan)
+          # STEP 4: HAPUS manual extern SUSFS dari SEMUA file (SIMPLE version)
           # ================================================================
           python3 <<'PYEOF'
           from pathlib import Path
           import re
 
-          files_with_manual_extern = [
+          files_to_clean = [
               "fs/stat.c", "fs/proc_namespace.c",
               "fs/proc/task_mmu.c", "fs/proc/cmdline.c",
               "fs/open.c", "fs/read_write.c", "fs/namespace.c",
+              "fs/exec.c", "kernel/sys.c", "kernel/reboot.c",
+              "drivers/input/input.c",
           ]
 
-          for filepath in files_with_manual_extern:
+          for filepath in files_to_clean:
               p = Path(filepath)
               if not p.exists():
                   continue
@@ -615,15 +427,15 @@ jobs:
                   text
               )
 
-              # SAFE: hanya hapus baris MURNI "extern ... susfs_xxx;"
-              # (bukan bagian dari deklarasi kompleks)
+              # SIMPLE: hapus baris single-line yang bentuknya "extern ... susfs_xxx...;"
               lines = text.split('\n')
               cleaned = []
               for line in lines:
                   stripped = line.strip()
-                  # Match pattern: extern <type> susfs_xxx(...);
-                  # atau: extern <type> susfs_xxx;
-                  if re.match(r'^extern\s+(?:struct\s+\w+\s*\*?|\w+\s*\*?)\s+susfs_\w+\s*(?:\([^)]*\))?\s*;\s*$', stripped):
+                  # Match: extern <apapun> susfs_xxx <apapun>;
+                  if (stripped.startswith('extern ')
+                      and 'susfs_' in stripped
+                      and stripped.endswith(';')):
                       continue
                   cleaned.append(line)
               text = '\n'.join(cleaned)
@@ -634,7 +446,7 @@ jobs:
           PYEOF
 
           # ================================================================
-          # STEP 6: Inject header ke semua SUSFS files
+          # STEP 5: Inject header ke semua SUSFS files
           # ================================================================
           python3 <<'PYEOF'
           from pathlib import Path
@@ -684,7 +496,7 @@ jobs:
           PYEOF
 
           # ================================================================
-          # STEP 7: Cleanup duplicate EXPORT_SYMBOL block
+          # STEP 6: Cleanup duplicate EXPORT_SYMBOL block
           # ================================================================
           if [ -f fs/stat.c ] && grep -q "^EXPORT_SYMBOL(vfs_getattr_nosec);$" fs/stat.c; then
             python3 <<'PYEOF'
@@ -712,49 +524,68 @@ jobs:
           PYEOF
           fi
 
-          # ================================================================
-          # STEP 8: DEBUG - Lihat fs/proc/cmdline.c setelah semua modifikasi
-          # ================================================================
           echo ""
-          echo "== fs/proc/cmdline.c lines 30-50 (setelah modifikasi) =="
-          sed -n '25,55p' fs/proc/cmdline.c 2>/dev/null || echo "  file not found"
+          echo "[OK] SUSFS manual fixes applied"
 
-          echo ""
-          echo "== fs/proc/cmdline.c header (first 20 lines) =="
-          head -20 fs/proc/cmdline.c
+      # ================================================================
+      # 8b. DEBUG - Verify state after manual fix
+      # ================================================================
+      - name: "DEBUG - Verify state after manual fix"
+        run: |
+          cd ${{ env.KERNEL_DIR }}
 
-          # ================================================================
-          # STEP 9: Verifikasi
-          # ================================================================
-          echo ""
-          echo "== Verifikasi susfs_extern.h =="
+          echo "======================================================"
+          echo "  1. Cek susfs_extern.h ADA & isinya"
+          echo "======================================================"
           if [ -f include/linux/susfs_extern.h ]; then
             echo "  [OK] Header exists ($(wc -l < include/linux/susfs_extern.h) lines)"
-            echo "  Static keys: $(grep -c '^extern struct static_key' include/linux/susfs_extern.h)"
-            echo "  Functions:   $(grep -c '^extern [^s]' include/linux/susfs_extern.h)"
-
             echo ""
-            echo "  Critical functions check:"
-            for fn in susfs_is_current_ksu_domain susfs_show_vfsmnt susfs_show_mountinfo susfs_show_vfsstat susfs_sus_kstat_spoof_generic_fillattr susfs_spoof_cmdline_or_bootconfig; do
-              if grep -q "extern.* ${fn}(" include/linux/susfs_extern.h; then
+            echo "  Critical function checks:"
+            for fn in susfs_is_current_ksu_domain susfs_sus_kstat_spoof_generic_fillattr susfs_spoof_cmdline_or_bootconfig susfs_spoof_uname; do
+              if grep -q "${fn}" include/linux/susfs_extern.h; then
                 echo "    [OK] $fn"
               else
                 echo "    [MISSING] $fn"
               fi
             done
+            echo ""
+            echo "  Static key checks:"
+            for sk in susfs_is_fake_cmdline_or_bootconfig_buffer_set susfs_is_hide_sus_mnts_for_non_su_procs_enabled susfs_is_uname_spoof_buffer_set susfs_is_log_enabled; do
+              if grep -q "$sk" include/linux/susfs_extern.h; then
+                echo "    [OK] $sk"
+              else
+                echo "    [MISSING] $sk"
+              fi
+            done
+          else
+            echo "  [FAIL] Header NOT generated - PANIC!"
+            exit 1
           fi
 
           echo ""
-          echo "== Verifikasi tidak ada duplicate extern =="
-          for f in fs/open.c fs/stat.c fs/proc_namespace.c fs/proc/task_mmu.c fs/proc/cmdline.c; do
+          echo "======================================================"
+          echo "  2. Cek fs/proc/cmdline.c setelah modifikasi"
+          echo "======================================================"
+          echo "  Include check (first 30 lines):"
+          head -30 fs/proc/cmdline.c | grep -E "^#include"
+
+          echo ""
+          echo "  Line 30-55 (area kritikal):"
+          sed -n '30,55p' fs/proc/cmdline.c
+
+          echo ""
+          echo "======================================================"
+          echo "  3. Manual extern check di semua SUSFS files"
+          echo "======================================================"
+          for f in fs/open.c fs/stat.c fs/proc_namespace.c fs/proc/task_mmu.c fs/proc/cmdline.c fs/read_write.c fs/namespace.c; do
             [ -f "$f" ] || continue
-            MANUAL_EXTERNS=$(grep -c "^extern.*susfs_" "$f" 2>/dev/null || echo 0)
-            HAS_HEADER=$(grep -c "susfs_extern.h" "$f" 2>/dev/null || echo 0)
-            echo "  $f -> manual_externs:$MANUAL_EXTERNS, has_header:$HAS_HEADER"
+            has_extern_h=$(grep -c "susfs_extern.h" "$f" 2>/dev/null || echo 0)
+            has_manual=$(grep -c "^extern.*susfs_" "$f" 2>/dev/null || echo 0)
+            echo "  $f -> extern.h:$has_extern_h, manual:$has_manual"
           done
 
           echo ""
-          echo "[OK] SUSFS manual fixes applied"
+          echo "[OK] DEBUG verification complete"
 
       # ================================================================
       # 9. Cleanup remaining reject files
