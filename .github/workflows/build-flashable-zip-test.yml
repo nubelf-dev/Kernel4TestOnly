@@ -1,4 +1,4 @@
-name: 2. Build Flashable ZIP - AnyKernel3 (BOS Beryllium + ReSukiSU + SUSFS)
+name: Build Flashable ZIP - AnyKernel3 (BOS Beryllium + ReSukiSU + SUSFS)
 
 on:
   workflow_dispatch:
