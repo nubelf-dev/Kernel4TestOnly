@@ -1,4 +1,4 @@
-name: Compile Kernel (Test)
+name: Compile Kernel (Test) - V2
 
 on:
   workflow_dispatch:
