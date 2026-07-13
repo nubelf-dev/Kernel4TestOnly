@@ -949,12 +949,74 @@ jobs:
           fi
 
       # ================================================================
-      # 17. Upload artifact (Image.gz-dtb saja)
+      # 17. Generate build metadata (untuk changelog di zip builder)
+      # ================================================================
+      - name: Generate build-metadata.json
+        if: success()
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+
+          # Extract info dari kernel yg sudah di-build
+          KERNEL_VERSION_STRING=$(strings out/vmlinux 2>/dev/null | grep -m1 "Linux version" || echo "unknown")
+          KERNEL_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+
+          # Info ReSukiSU (ganti KernelSU-Next dengan ReSukiSU untuk kamu)
+          if [ -d KernelSU ]; then
+            cd KernelSU
+            KSU_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+            KSU_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "main")
+            cd ..
+          else
+            KSU_COMMIT="unknown"
+            KSU_TAG="main"
+          fi
+
+          BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M UTC')
+
+          cd $GITHUB_WORKSPACE
+
+          # Generate JSON metadata
+          cat > build-metadata.json << EOF
+          {
+            "kernel_source": "${{ env.KERNEL_REPO }}",
+            "kernel_branch": "${{ env.KERNEL_BRANCH }}",
+            "kernel_commit": "${KERNEL_COMMIT}",
+            "kernel_version_string": "${KERNEL_VERSION_STRING}",
+            "ksu_source": "${{ env.RESUKISU_REPO }}",
+            "ksu_tag": "${KSU_TAG}",
+            "ksu_commit": "${KSU_COMMIT}",
+            "clang_url": "${{ env.CLANG_URL }}",
+            "clang_version": "${{ env.CLANG_VERSION }}",
+            "build_date": "${BUILD_DATE}",
+            "build_user": "${{ env.KBUILD_BUILD_USER }}",
+            "build_host": "${{ env.KBUILD_BUILD_HOST }}",
+            "github_run_id": "${{ github.run_id }}",
+            "github_run_number": "${{ github.run_number }}",
+            "github_sha": "${{ github.sha }}"
+          }
+          EOF
+
+          echo "== build-metadata.json =="
+          cat build-metadata.json
+
+      # ================================================================
+      # 17a. Upload build metadata
+      # ================================================================
+      - name: Upload build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metadata
+          path: build-metadata.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ================================================================
+      # 17b. Upload kernel image (dengan naming prefix seperti workflow zip)
       # ================================================================
       - name: Upload kernel image
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-image
+          name: bos-beryllium-resukisu-gz-dtb    # ← Format: <prefix>-gz-dtb
           path: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
           if-no-files-found: error
           retention-days: 7
