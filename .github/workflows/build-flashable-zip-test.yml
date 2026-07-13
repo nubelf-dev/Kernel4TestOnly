@@ -132,7 +132,7 @@ jobs:
           cd ak3-build
 
           # Hapus contoh ramdisk device referensi (maguro/tuna)
-          rm -rf ramdisk patch vendor_ramdisk vendor_patch README.md version .git .github 2>/dev/null || true
+          rm -rf .git .github ramdisk patch LICENSE README.md version 2>/dev/null || true
 
           python3 << 'PYEOF'
           import re
