@@ -17,7 +17,7 @@ on:
       kernel_string:
         description: 'kernel.string yang ditampilkan di AnyKernel3 (info build)'
         required: false
-        default: 'BOS Beryllium ReSukiSU + SUSFS 2.2.0 Kernel'
+        default: 'BaikalOS A13 Beryllium ReSukiSU + SUSFS 2.2.0 Kernel | Linux version 4.9.337-perf (Nerf.@OldlineSSS)'
       manager_apk_source:
         description: 'Repo sumber manager APK ReSukiSU (URL rilis akan disusun otomatis dari ksu_tag hasil compile)'
         required: true
