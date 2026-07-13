@@ -66,12 +66,10 @@ jobs:
             binutils-arm-linux-gnueabi \
             ca-certificates lld llvm
 
-          # Verify assemblers exist
           echo "[INFO] Verifying cross toolchain assemblers..."
           which aarch64-linux-gnu-as || echo "[FAIL] aarch64-linux-gnu-as not found"
           which arm-linux-gnueabi-as || echo "[FAIL] arm-linux-gnueabi-as not found"
 
-          # Init ccache
           ccache --max-size=5G
           ccache --show-stats
 
@@ -172,7 +170,6 @@ jobs:
           }
 
           print("[INFO] Total signatures extracted: " + str(len(signatures)))
-          print("")
 
           header = [
               '/* Auto-generated ksu_hook.h - 7 hook wajib (signature ASLI) */',
@@ -201,9 +198,6 @@ jobs:
           out = Path('include/linux/ksu_hook.h')
           out.parent.mkdir(parents=True, exist_ok=True)
           out.write_text('\n'.join(header))
-          print("")
-          print("== Contents of include/linux/ksu_hook.h ==")
-          print(out.read_text())
           PYEOF
 
       # ================================================================
@@ -227,27 +221,18 @@ jobs:
           if [ -n "$REJECTS" ]; then
             echo "[WARN] Found reject files:"
             echo "$REJECTS"
-            for rej in $REJECTS; do
-              echo "================================================"
-              echo "[FILE] $rej"
-              echo "================================================"
-              cat "$rej"
-              echo ""
-            done
           else
             echo "[OK] No reject files"
           fi
 
       # ================================================================
-      # 8. Manual fix SUSFS hunks
+      # 8. Manual fix SUSFS hunks (generate header + inject includes)
       # ================================================================
       - name: "Manual fix SUSFS hunks"
         run: |
           cd ${{ env.KERNEL_DIR }}
 
-          # ================================================================
           # STEP 1: Auto-generate include/linux/susfs_extern.h
-          # ================================================================
           echo "[INFO] Generating include/linux/susfs_extern.h..."
           python3 <<'PYEOF'
           import re
@@ -263,8 +248,6 @@ jobs:
                           "KernelSU/kernel/**/*.c", "KernelSU/kernel/**/*.h"]:
               for f in glob.glob(pattern, recursive=True):
                   source_files.append(Path(f))
-
-          # JUGA scan file yang ke-patch SUSFS (untuk pick up definition yang mungkin di sana)
           for pattern in ["fs/open.c", "fs/exec.c", "fs/read_write.c", "fs/stat.c",
                           "fs/namespace.c"]:
               p = Path(pattern)
@@ -277,25 +260,21 @@ jobs:
           static_keys_false = set()
           funcs = {}
 
-          # PATTERN yang lebih permissive untuk return type
-          # Match: [static] [inline] <return_type_with_pointer> susfs_xxx(params) {
-          # Return type bisa: bool, void, int, long, unsigned X, struct X, dengan * di manapun
           FUNC_DEF_PATTERN = re.compile(
-              r'^(?!\s*//|\s*\*|\s*/\*)'                        # skip komentar
-              r'(?:__\w+\s+)?'                                   # attribute like __must_check
-              r'(?:inline\s+)?'                                  # optional inline
-              r'('                                               # GROUP 1: return type
+              r'^(?!\s*//|\s*\*|\s*/\*)'
+              r'(?:__\w+\s+)?'
+              r'(?:inline\s+)?'
+              r'('
               r'(?:struct\s+\w+|bool|void|int|long|size_t|ssize_t|unsigned(?:\s+\w+)?)'
-              r'\s*\**\s*'                                       # pointers: 0+ * with whitespace
+              r'\s*\**\s*'
               r')'
-              r'(susfs_\w+)'                                     # GROUP 2: function name
-              r'\s*\('                                           # opening paren
-              r'([^)]*)'                                         # GROUP 3: params
-              r'\)\s*\{',                                        # ) {
+              r'(susfs_\w+)'
+              r'\s*\('
+              r'([^)]*)'
+              r'\)\s*\{',
               re.MULTILINE
           )
 
-          # Prototype pattern (dengan ;)
           FUNC_PROTO_PATTERN = re.compile(
               r'^(?!\s*//|\s*\*|\s*/\*)'
               r'(?:extern\s+)?'
@@ -321,15 +300,11 @@ jobs:
               for name in re.findall(r'DEFINE_STATIC_KEY_FALSE\s*\(\s*(\w+)\s*\)', text):
                   static_keys_false.add(name)
 
-              # Function definitions
               for m in FUNC_DEF_PATTERN.finditer(text):
-                  rettype = m.group(1).strip()
-                  # Normalisasi spasi (misal "struct  filename  *" -> "struct filename *")
-                  rettype = re.sub(r'\s+', ' ', rettype).strip()
+                  rettype = re.sub(r'\s+', ' ', m.group(1).strip())
                   name = m.group(2)
                   params = m.group(3).strip()
 
-                  # Skip kalau static (private ke file)
                   start = max(0, m.start() - 100)
                   preamble = text[start:m.start()]
                   last_newline = preamble.rfind('\n')
@@ -339,16 +314,13 @@ jobs:
 
                   funcs[name] = (rettype, params)
 
-              # Prototypes (fallback kalau tidak ada definition)
               for m in FUNC_PROTO_PATTERN.finditer(text):
-                  rettype = m.group(1).strip()
-                  rettype = re.sub(r'\s+', ' ', rettype).strip()
+                  rettype = re.sub(r'\s+', ' ', m.group(1).strip())
                   name = m.group(2)
                   params = m.group(3).strip()
                   if name not in funcs:
                       funcs[name] = (rettype, params)
 
-          # Build header
           header = [
               '/* Auto-generated SUSFS extern header */',
               '#ifndef __SUSFS_EXTERN_H',
@@ -377,13 +349,7 @@ jobs:
 
           for name in sorted(funcs.keys()):
               rettype, params = funcs[name]
-              # Format return type: pastikan ada space sebelum function name kalau perlu
-              # (misal "struct filename*" -> "struct filename *")
-              if rettype.endswith('*'):
-                  formatted = '{} {}({});'.format(rettype, name, params)
-              else:
-                  formatted = '{} {}({});'.format(rettype, name, params)
-              header.append('extern ' + formatted)
+              header.append('extern {} {}({});'.format(rettype, name, params))
 
           header.append('')
           header.append('#endif /* __SUSFS_EXTERN_H */')
@@ -395,18 +361,9 @@ jobs:
           print("  Static keys (true):  {}".format(len(static_keys_true)))
           print("  Static keys (false): {}".format(len(static_keys_false)))
           print("  Functions:           {}".format(len(funcs)))
-
-          # Print ALL functions for debugging
-          print("")
-          print("== ALL functions in header ==")
-          for name in sorted(funcs.keys()):
-              rettype, params = funcs[name]
-              print("  extern {} {}({});".format(rettype, name, params))
           PYEOF
 
-          # ================================================================
           # STEP 2: Fix proc_namespace.c include
-          # ================================================================
           if [ -f fs/proc_namespace.c ] && ! grep -q "susfs_def.h" fs/proc_namespace.c; then
             sed -i '/#include "pnode.h"/a\
           #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
@@ -414,9 +371,7 @@ jobs:
           #endif' fs/proc_namespace.c || true
           fi
 
-          # ================================================================
           # STEP 3: Fix fs/stat.c sus_kstat hunk
-          # ================================================================
           if [ -f fs/stat.c ] && ! grep -q "int err = inode->i_op->getattr" fs/stat.c; then
             python3 <<'PYEOF'
           import re
@@ -443,9 +398,7 @@ jobs:
           PYEOF
           fi
 
-          # ================================================================
-          # STEP 4: HAPUS manual extern SUSFS dari SEMUA file (SIMPLE version)
-          # ================================================================
+          # STEP 4: HAPUS manual extern SUSFS dari SEMUA file
           python3 <<'PYEOF'
           from pathlib import Path
           import re
@@ -465,7 +418,6 @@ jobs:
               text = p.read_text()
               original = text
 
-              # Hapus block: #ifdef CONFIG_KSU_SUSFS_xxx ... extern susfs_... #endif
               text = re.sub(
                   r'\n#ifdef CONFIG_KSU_SUSFS[^\n]*\n'
                   r'(?:extern [^\n]*susfs_[^\n]*\n)+'
@@ -474,12 +426,10 @@ jobs:
                   text
               )
 
-              # SIMPLE: hapus baris single-line yang bentuknya "extern ... susfs_xxx...;"
               lines = text.split('\n')
               cleaned = []
               for line in lines:
                   stripped = line.strip()
-                  # Match: extern <apapun> susfs_xxx <apapun>;
                   if (stripped.startswith('extern ')
                       and 'susfs_' in stripped
                       and stripped.endswith(';')):
@@ -492,9 +442,7 @@ jobs:
                   print("  [OK] Removed manual SUSFS externs from {}".format(filepath))
           PYEOF
 
-          # ================================================================
           # STEP 5: Inject header ke semua SUSFS files
-          # ================================================================
           python3 <<'PYEOF'
           from pathlib import Path
 
@@ -542,9 +490,7 @@ jobs:
               print("  [OK] Added {} include(s) to {}".format(len(missing), filepath))
           PYEOF
 
-          # ================================================================
           # STEP 6: Cleanup duplicate EXPORT_SYMBOL block
-          # ================================================================
           if [ -f fs/stat.c ] && grep -q "^EXPORT_SYMBOL(vfs_getattr_nosec);$" fs/stat.c; then
             python3 <<'PYEOF'
           from pathlib import Path
@@ -575,248 +521,7 @@ jobs:
           echo "[OK] SUSFS manual fixes applied"
 
       # ================================================================
-      # 8b. DEBUG - Verify state after manual fix
-      # ================================================================
-      - name: "DEBUG - Verify state after manual fix"
-        run: |
-          cd ${{ env.KERNEL_DIR }}
-
-          echo "======================================================"
-          echo "  1. Cek susfs_extern.h ADA & isinya"
-          echo "======================================================"
-          if [ -f include/linux/susfs_extern.h ]; then
-            echo "  [OK] Header exists ($(wc -l < include/linux/susfs_extern.h) lines)"
-            echo ""
-            echo "  Critical function checks:"
-            for fn in susfs_is_current_ksu_domain susfs_sus_kstat_spoof_generic_fillattr susfs_spoof_cmdline_or_bootconfig susfs_spoof_uname; do
-              if grep -q "${fn}" include/linux/susfs_extern.h; then
-                echo "    [OK] $fn"
-              else
-                echo "    [MISSING] $fn"
-              fi
-            done
-            echo ""
-            echo "  Static key checks:"
-            for sk in susfs_is_fake_cmdline_or_bootconfig_buffer_set susfs_is_hide_sus_mnts_for_non_su_procs_enabled susfs_is_uname_spoof_buffer_set susfs_is_log_enabled; do
-              if grep -q "$sk" include/linux/susfs_extern.h; then
-                echo "    [OK] $sk"
-              else
-                echo "    [MISSING] $sk"
-              fi
-            done
-          else
-            echo "  [FAIL] Header NOT generated - PANIC!"
-            exit 1
-          fi
-
-          echo ""
-          echo "======================================================"
-          echo "  2. Cek fs/proc/cmdline.c setelah modifikasi"
-          echo "======================================================"
-          echo "  Include check (first 30 lines):"
-          head -30 fs/proc/cmdline.c | grep -E "^#include"
-
-          echo ""
-          echo "  Line 30-55 (area kritikal):"
-          sed -n '30,55p' fs/proc/cmdline.c
-
-          echo ""
-          echo "======================================================"
-          echo "  3. Manual extern check di semua SUSFS files"
-          echo "======================================================"
-          for f in fs/open.c fs/stat.c fs/proc_namespace.c fs/proc/task_mmu.c fs/proc/cmdline.c fs/read_write.c fs/namespace.c; do
-            [ -f "$f" ] || continue
-            has_extern_h=$(grep -c "susfs_extern.h" "$f" 2>/dev/null || echo 0)
-            has_manual=$(grep -c "^extern.*susfs_" "$f" 2>/dev/null || echo 0)
-            echo "  $f -> extern.h:$has_extern_h, manual:$has_manual"
-          done
-
-          echo ""
-          echo "[OK] DEBUG verification complete"
-
-      # ================================================================
-      # 8c. Fix fs/proc/cmdline.c - remove ALL orphan SUSFS blocks & re-inject
-      # ================================================================
-      - name: "Fix fs/proc/cmdline.c SUSFS injection"
-        run: |
-          cd ${{ env.KERNEL_DIR }}
-
-          FILE="fs/proc/cmdline.c"
-          [ ! -f "$FILE" ] && exit 0
-
-          echo "======================================================"
-          echo "  BEFORE FIX: fs/proc/cmdline.c FULL (with line numbers)"
-          echo "======================================================"
-          awk '{printf "%3d: %s\n", NR, $0}' "$FILE"
-          echo ""
-
-          echo "[FIX] Removing orphan SUSFS blocks & re-injecting properly..."
-
-          python3 <<'PYEOF'
-          from pathlib import Path
-          import re
-
-          p = Path("fs/proc/cmdline.c")
-          text = p.read_text()
-
-          # ================================================================
-          # STEP A: NUKE all #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG ... #endif blocks
-          # (both properly placed and orphan)
-          # We'll re-inject in correct location later
-          # ================================================================
-          print("[STEP A] Removing all existing SUSFS SPOOF_CMDLINE blocks...")
-
-          # Regex: match #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG ... #endif
-          # Non-greedy, but include newlines
-          pattern = re.compile(
-              r'\n*#ifdef\s+CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\b'
-              r'.*?'
-              r'#endif\s*(?://[^\n]*)?\n?',
-              re.DOTALL
-          )
-
-          matches = list(pattern.finditer(text))
-          print("  Found {} SUSFS SPOOF_CMDLINE block(s)".format(len(matches)))
-          for i, m in enumerate(matches):
-              start_line = text[:m.start()].count('\n') + 1
-              end_line = text[:m.end()].count('\n') + 1
-              print("    Block {}: line {} to {}".format(i+1, start_line, end_line))
-
-          text = pattern.sub('\n', text)
-
-          # Cleanup multiple blank lines
-          text = re.sub(r'\n{3,}', '\n\n', text)
-
-          # ================================================================
-          # STEP B: Also nuke any ORPHAN "if (static_branch_likely(&susfs_..." lines
-          # that are NOT inside proper function (top-level bare statements)
-          # ================================================================
-          print("")
-          print("[STEP B] Removing any remaining orphan SUSFS statements...")
-
-          # Match standalone lines that reference susfs_is_fake_cmdline
-          # in the pattern of `if (static_branch_likely(&susfs_...))` followed by block
-          # Wrapped by nothing or bare
-          lines = text.split('\n')
-          new_lines = []
-          i = 0
-          brace_depth = 0
-          in_comment = False
-          removed_orphans = 0
-
-          while i < len(lines):
-              line = lines[i]
-              stripped = line.strip()
-
-              # Track comments (simplified)
-              if '/*' in line and '*/' not in line:
-                  in_comment = True
-              elif '*/' in line:
-                  in_comment = False
-                  new_lines.append(line)
-                  i += 1
-                  continue
-
-              if in_comment:
-                  new_lines.append(line)
-                  i += 1
-                  continue
-
-              # Track brace depth (excluding braces in strings/comments - simplified)
-              # Remove strings and comments for counting
-              clean_line = re.sub(r'"[^"]*"', '""', line)
-              clean_line = re.sub(r"'[^']*'", "''", clean_line)
-              clean_line = re.sub(r'//.*$', '', clean_line)
-
-              # Check for orphan SUSFS block at depth 0
-              # Pattern: `if (static_branch_likely(&susfs_..._buffer_set))` at brace_depth 0
-              if (brace_depth == 0
-                  and 'static_branch_likely' in stripped
-                  and 'susfs_' in stripped):
-
-                  orphan_start = i
-                  # Find matching closing brace
-                  temp_depth = 0
-                  block_end = i
-                  for j in range(i, len(lines)):
-                      c_line = re.sub(r'"[^"]*"', '""', lines[j])
-                      c_line = re.sub(r'//.*$', '', c_line)
-                      temp_depth += c_line.count('{') - c_line.count('}')
-                      if temp_depth <= 0 and '{' in lines[j]:
-                          block_end = j
-                          break
-                      elif temp_depth <= 0 and j > i:
-                          block_end = j - 1
-                          break
-
-                  print("  [ORPHAN] Removing orphan SUSFS block at line {}-{}".format(
-                      orphan_start + 1, block_end + 1))
-                  removed_orphans += 1
-                  i = block_end + 1
-                  continue
-
-              # Update brace depth AFTER processing (so opening brace of function is counted)
-              brace_depth += clean_line.count('{') - clean_line.count('}')
-
-              new_lines.append(line)
-              i += 1
-
-          if removed_orphans > 0:
-              text = '\n'.join(new_lines)
-              print("  [OK] Removed {} orphan SUSFS block(s)".format(removed_orphans))
-          else:
-              print("  [OK] No orphan blocks found")
-
-          # ================================================================
-          # STEP C: Inject SUSFS check in correct location (cmdline_proc_show)
-          # ================================================================
-          print("")
-          print("[STEP C] Injecting SUSFS check into cmdline_proc_show...")
-
-          # Cari signature cmdline_proc_show
-          func_pattern = re.compile(
-              r'(static\s+int\s+cmdline_proc_show\s*\([^)]*\)\s*\{)',
-              re.MULTILINE
-          )
-          m = func_pattern.search(text)
-
-          if m:
-              # Inject setelah opening brace
-              injection = (
-                  m.group(0) + '\n'
-                  '#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n'
-                  '\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n'
-                  '\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n'
-                  '\t\treturn 0;\n'
-                  '\t}\n'
-                  '#endif'
-              )
-              text = text.replace(m.group(0), injection, 1)
-              print("  [OK] Injected SUSFS check into cmdline_proc_show")
-          else:
-              print("  [WARN] cmdline_proc_show function not found")
-
-          # Save
-          p.write_text(text)
-          print("")
-          print("[DONE] fs/proc/cmdline.c fixed")
-          PYEOF
-
-          echo ""
-          echo "======================================================"
-          echo "  AFTER FIX: fs/proc/cmdline.c FULL (with line numbers)"
-          echo "======================================================"
-          awk '{printf "%3d: %s\n", NR, $0}' "$FILE"
-
-          echo ""
-          echo "======================================================"
-          echo "  Verify: no orphan static_branch_likely at top-level"
-          echo "======================================================"
-          # Cek apakah masih ada baris di top-level yg mengandung static_branch_likely
-          grep -n "static_branch_likely" "$FILE" | head -10 || echo "  (no matches)"
-
-      # ================================================================
-      # 9. Cleanup remaining reject files
+      # 9. Cleanup remaining reject files (HARUS SEBELUM Fix cmdline.c!)
       # ================================================================
       - name: Cleanup remaining reject files
         run: |
@@ -825,7 +530,8 @@ jobs:
           echo "[CHK] Checking for remaining reject files..."
           REMAINING=$(find . -name "*.rej" 2>/dev/null)
           if [ -n "$REMAINING" ]; then
-            echo "[WARN] Remaining reject files (attempting fuzz):"
+            echo "[WARN] Remaining reject files:"
+            echo "$REMAINING"
             for rej in $REMAINING; do
               TARGET_FILE="${rej%.rej}"
               echo "  [FIX] Trying $rej with fuzz..."
@@ -845,7 +551,217 @@ jobs:
           echo "[OK] Cleanup complete"
 
       # ================================================================
-      # 10. Inject 7 hook WAJIB (signature ASLI)
+      # 10. REBUILD fs/proc/cmdline.c (setelah cleanup, jadi HASIL AKHIR)
+      # ================================================================
+      - name: "Fix fs/proc/cmdline.c - REBUILD from clean template"
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+
+          FILE="fs/proc/cmdline.c"
+          [ ! -f "$FILE" ] && exit 0
+
+          # SAFETY: hapus .rej dan .orig kalau ada (biar tidak ke-apply lagi)
+          rm -f "${FILE}.rej" "${FILE}.orig"
+
+          echo "======================================================"
+          echo "  BEFORE REBUILD (current state):"
+          echo "======================================================"
+          wc -l "$FILE"
+          echo ""
+          echo "  Occurrences:"
+          echo "    cmdline_proc_show:  $(grep -c "cmdline_proc_show" "$FILE")"
+          echo "    cmdline_proc_open:  $(grep -c "cmdline_proc_open" "$FILE")"
+          echo "    cmdline_proc_fops:  $(grep -c "cmdline_proc_fops" "$FILE")"
+          echo "    patch_flag:         $(grep -c "^static void patch_flag" "$FILE")"
+
+          # Deteksi BaikalOS custom (pakai patch_flag + new_command_line)
+          USES_PATCH_FLAG=$(grep -c "^static void patch_flag" "$FILE" || echo 0)
+
+          # Backup
+          cp "$FILE" "$FILE.original.bak"
+
+          echo ""
+          echo "[REBUILD] Writing clean file..."
+
+          if [ "$USES_PATCH_FLAG" -gt 0 ]; then
+            echo "  [INFO] BaikalOS variant detected"
+
+            cat > "$FILE" <<'CFILE'
+          // SPDX-License-Identifier: GPL-2.0
+          #include <linux/jump_label.h>
+          #include <linux/susfs.h>
+          #include <linux/susfs_def.h>
+          #include <linux/susfs_extern.h>
+          #include <linux/fs.h>
+          #include <linux/init.h>
+          #include <linux/proc_fs.h>
+          #include <linux/seq_file.h>
+          #include <asm/setup.h>
+
+          static char new_command_line[COMMAND_LINE_SIZE];
+
+          static int cmdline_proc_show(struct seq_file *m, void *v)
+          {
+          #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+          	if (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {
+          		susfs_spoof_cmdline_or_bootconfig(m);
+          		return 0;
+          	}
+          #endif
+          	seq_puts(m, new_command_line);
+          	seq_putc(m, '\n');
+          	return 0;
+          }
+
+          static int cmdline_proc_open(struct inode *inode, struct file *file)
+          {
+          	return single_open(file, cmdline_proc_show, NULL);
+          }
+
+          static const struct file_operations cmdline_proc_fops = {
+          	.open		= cmdline_proc_open,
+          	.read		= seq_read,
+          	.llseek		= seq_lseek,
+          	.release	= single_release,
+          };
+
+          static void patch_flag(char *cmd, const char *flag, const char *val)
+          {
+          	size_t flag_len, val_len;
+          	char *start, *end;
+
+          	start = strstr(cmd, flag);
+          	if (!start)
+          		return;
+
+          	flag_len = strlen(flag);
+          	val_len = strlen(val);
+          	end = start + flag_len + strcspn(start + flag_len, " ");
+          	memmove(start + flag_len + val_len, end, strlen(end) + 1);
+          	memcpy(start + flag_len, val, val_len);
+          }
+
+          static int __init proc_cmdline_init(void)
+          {
+          	strcpy(new_command_line, saved_command_line);
+          	patch_flag(new_command_line, "androidboot.verifiedbootstate=",
+          		"green androidboot.vbmeta.digest=8c36e88b4b331f29ed15d3f12e39f776b8e011b2db1228d313ee9ac15549d7c4 androidboot.vbmeta.hash_alg=sha256 androidboot.vbmeta.size=4096 androidboot.vbmeta.avb_version=1.1");
+          	patch_flag(new_command_line, "buildvariant=", "user");
+
+          	proc_create("cmdline", 0, NULL, &cmdline_proc_fops);
+          	return 0;
+          }
+          fs_initcall(proc_cmdline_init);
+          CFILE
+
+          else
+            echo "  [INFO] Standard vanilla kernel template"
+
+            cat > "$FILE" <<'CFILE'
+          // SPDX-License-Identifier: GPL-2.0
+          #include <linux/jump_label.h>
+          #include <linux/susfs.h>
+          #include <linux/susfs_def.h>
+          #include <linux/susfs_extern.h>
+          #include <linux/fs.h>
+          #include <linux/init.h>
+          #include <linux/proc_fs.h>
+          #include <linux/seq_file.h>
+          #include <asm/setup.h>
+
+          static int cmdline_proc_show(struct seq_file *m, void *v)
+          {
+          #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+          	if (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {
+          		susfs_spoof_cmdline_or_bootconfig(m);
+          		return 0;
+          	}
+          #endif
+          	seq_puts(m, saved_command_line);
+          	seq_putc(m, '\n');
+          	return 0;
+          }
+
+          static int cmdline_proc_open(struct inode *inode, struct file *file)
+          {
+          	return single_open(file, cmdline_proc_show, NULL);
+          }
+
+          static const struct file_operations cmdline_proc_fops = {
+          	.open		= cmdline_proc_open,
+          	.read		= seq_read,
+          	.llseek		= seq_lseek,
+          	.release	= single_release,
+          };
+
+          static int __init proc_cmdline_init(void)
+          {
+          	proc_create("cmdline", 0, NULL, &cmdline_proc_fops);
+          	return 0;
+          }
+          fs_initcall(proc_cmdline_init);
+          CFILE
+          fi
+
+          echo "[OK] File rebuilt"
+
+          echo ""
+          echo "======================================================"
+          echo "  AFTER REBUILD: fs/proc/cmdline.c FULL"
+          echo "======================================================"
+          cat -n "$FILE"
+
+          echo ""
+          echo "  Occurrences (should be 1x each):"
+          echo "    cmdline_proc_show:  $(grep -c "cmdline_proc_show" "$FILE")"
+          echo "    cmdline_proc_open:  $(grep -c "cmdline_proc_open" "$FILE")"
+          echo "    cmdline_proc_fops:  $(grep -c "cmdline_proc_fops" "$FILE")"
+          echo "    #ifdef count:       $(grep -c "^#ifdef" "$FILE")"
+          echo "    #endif count:       $(grep -c "^#endif" "$FILE")"
+
+      # ================================================================
+      # 11. DEBUG - Final verification before build
+      # ================================================================
+      - name: "DEBUG - Final verification"
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+
+          echo "======================================================"
+          echo "  1. Susfs headers check"
+          echo "======================================================"
+          if [ -f include/linux/susfs_extern.h ]; then
+            echo "  [OK] susfs_extern.h exists ($(wc -l < include/linux/susfs_extern.h) lines)"
+            echo "  Static keys: $(grep -c '^extern struct static_key' include/linux/susfs_extern.h)"
+            echo "  Functions:   $(grep -c '^extern [^s]' include/linux/susfs_extern.h)"
+          fi
+
+          echo ""
+          echo "======================================================"
+          echo "  2. fs/proc/cmdline.c final state"
+          echo "======================================================"
+          wc -l fs/proc/cmdline.c
+          echo "  Occurrences (each should be 1):"
+          echo "    cmdline_proc_show:  $(grep -c cmdline_proc_show fs/proc/cmdline.c)"
+          echo "    cmdline_proc_open:  $(grep -c cmdline_proc_open fs/proc/cmdline.c)"
+          echo "    static_branch_likely: $(grep -c static_branch_likely fs/proc/cmdline.c)"
+
+          echo ""
+          echo "======================================================"
+          echo "  3. No leftover .rej or .orig files"
+          echo "======================================================"
+          REJECTS=$(find . -name "*.rej" 2>/dev/null | head -10)
+          if [ -n "$REJECTS" ]; then
+            echo "  [WARN] .rej files still present:"
+            echo "$REJECTS"
+          else
+            echo "  [OK] No .rej files"
+          fi
+
+          echo ""
+          echo "[OK] Final verification complete"
+
+      # ================================================================
+      # 12. Inject 7 hook WAJIB (signature ASLI)
       # ================================================================
       - name: "Apply 7 hook WAJIB signature ASLI"
         run: |
@@ -894,7 +810,7 @@ jobs:
               "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"
           fi
 
-          # 3. stat (kernel 4.9 pakai 'flag', bukan 'flags')
+          # 3. stat
           add_include fs/stat.c
           if ! grep -q "ksu_handle_stat" fs/stat.c; then
             inject_hook fs/stat.c "SYSCALL_DEFINE4.newfstatat" \
@@ -942,18 +858,18 @@ jobs:
           done
 
       # ================================================================
-      # 11. Verify SUSFS integration
+      # 13. Verify SUSFS integration
       # ================================================================
       - name: Verify SUSFS integration
         run: |
           cd ${{ env.KERNEL_DIR }}
 
           echo "[CHK] Verifying SUSFS integration..."
-          for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h include/linux/ksu_hook.h KernelSU/kernel/susfs.c; do
+          for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h include/linux/susfs_extern.h include/linux/ksu_hook.h KernelSU/kernel/susfs.c; do
             if [ -f "$f" ]; then
               echo "  [OK] $f exists"
             else
-              echo "  [i]  $f not found (may be expected)"
+              echo "  [i]  $f not found"
             fi
           done
 
@@ -961,7 +877,7 @@ jobs:
           echo "[OK] Verification complete"
 
       # ================================================================
-      # 12. Setup defconfig
+      # 14. Setup defconfig
       # ================================================================
       - name: Setup defconfig
         run: |
@@ -988,11 +904,8 @@ jobs:
 
           echo "[NOTE] Ensuring KSU + SUSFS + manual hook configs..."
 
-          # ReSukiSU wajib manual hook (no kprobe)
           add_config "CONFIG_KSU" "y"
           add_config "CONFIG_KSU_MANUAL_HOOK" "y"
-
-          # SUSFS features
           add_config "CONFIG_KSU_SUSFS" "y"
           add_config "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT" "y"
           add_config "CONFIG_KSU_SUSFS_SUS_PATH" "y"
@@ -1009,7 +922,7 @@ jobs:
           echo "[OK] Defconfig ready"
 
       # ================================================================
-      # 13. Fix CLANG_PREFIX32 for VDSO 32-bit compat
+      # 15. Fix CLANG_PREFIX32 for VDSO 32-bit compat
       # ================================================================
       - name: "Patch arch/arm64/Makefile - fix CLANG_PREFIX32"
         run: |
@@ -1021,12 +934,8 @@ jobs:
             exit 1
           fi
 
-          echo "== CLANG_PREFIX32 / GCC_TOOLCHAIN32 lookup =="
-          grep -n "CLANG_PREFIX32\|GCC_TOOLCHAIN32\|CLANG_TARGET_ARM32\|CLANG_GCC32_TC" "$MAIN_MK" || echo "  [i] Not found in this kernel"
-
           cp "$MAIN_MK" "$MAIN_MK.orig"
 
-          # Official ClangBuiltLinux fix (issue #1099)
           sed -i -E \
             's@(CLANG_PREFIX32[[:space:]]*:=[[:space:]]*--prefix=\$\(GCC_TOOLCHAIN32_DIR\))[[:space:]]*$@\1$(notdir $(CROSS_COMPILE_ARM32))@' \
             "$MAIN_MK"
@@ -1041,7 +950,7 @@ jobs:
           rm -f "$MAIN_MK.orig"
 
       # ================================================================
-      # 14. Skip broken DTB (QVR headset, interposer SDM670)
+      # 16. Skip broken DTB
       # ================================================================
       - name: "Skip broken DTB (QVR, SDM670 interposer)"
         run: |
@@ -1066,18 +975,13 @@ jobs:
             if grep -q "$dtb" "$DTS_MK"; then
               sed -i "/$dtb/d" "$DTS_MK"
               echo "[OK] Removed $dtb from $DTS_MK"
-            else
-              echo "[i] $dtb not in $DTS_MK (skipped)"
             fi
           done
-
-          echo "== Diff =="
-          diff "$DTS_MK.orig" "$DTS_MK" || true
 
           rm -f "$DTS_MK.orig"
 
       # ================================================================
-      # 15. Build Kernel
+      # 17. Build Kernel
       # ================================================================
       - name: Build kernel
         run: |
@@ -1130,7 +1034,6 @@ jobs:
           echo "  Compiling kernel (parallel)..."
           echo "================================================"
 
-          # Simpan full log ke build.log
           set +e
           make -j$(nproc --all) "${MAKE_ARGS[@]}" 2>&1 | tee build.log
           BUILD_STATUS=${PIPESTATUS[0]}
@@ -1146,11 +1049,8 @@ jobs:
 
           echo "  [FAIL] Build failed with exit code $BUILD_STATUS"
           echo "================================================"
-          echo ""
 
-          # =============================================================
-          # DIAGNOSTIC: Extract error yang beneran
-          # =============================================================
+          echo ""
           echo "======================================================"
           echo "  DIAGNOSTIC: Grep 'error:' / 'Error' / 'fatal:' lines"
           echo "======================================================"
@@ -1170,11 +1070,8 @@ jobs:
             echo "  [i] No 'error:' pattern found, showing 200 last lines:"
             tail -200 build.log
           fi
-          echo ""
 
-          # =============================================================
-          # RETRY dengan -j1 untuk ISOLASI ERROR (biar output tidak campur aduk)
-          # =============================================================
+          echo ""
           echo "======================================================"
           echo "  RETRY with -j1 to isolate the actual error"
           echo "======================================================"
@@ -1193,7 +1090,7 @@ jobs:
           exit $BUILD_STATUS
 
       # ================================================================
-      # 16. Verify kernel output
+      # 18. Verify kernel output
       # ================================================================
       - name: Verify kernel output
         run: |
@@ -1220,22 +1117,10 @@ jobs:
             exit 1
           fi
 
-          echo ""
-
-          if [ -f "out/include/generated/compile.h" ]; then
-            echo "[INFO] compile.h:"
-            cat out/include/generated/compile.h
-            echo ""
-          fi
-
-          if grep -q "${{ env.KBUILD_BUILD_USER }}" out/include/generated/compile.h 2>/dev/null; then
-            echo "[OK] KBUILD_BUILD_USER is correct"
-          fi
-
           echo "[OK] Kernel build verification complete"
 
       # ================================================================
-      # 17. Upload artifacts
+      # 19. Upload artifacts
       # ================================================================
       - name: Upload kernel image
         uses: actions/upload-artifact@v4
@@ -1260,7 +1145,7 @@ jobs:
           retention-days: 3
 
       # ================================================================
-      # 18. Build summary
+      # 20. Build summary
       # ================================================================
       - name: Build summary
         if: always()
@@ -1274,10 +1159,8 @@ jobs:
           echo "| Root Solution | ReSukiSU (manual hook, 7 hooks) |" >> $GITHUB_STEP_SUMMARY
           echo "| SUSFS | v2.2.0 |" >> $GITHUB_STEP_SUMMARY
           echo "| Clang | ${{ env.CLANG_VERSION }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Cross Toolchain | GNU (Ubuntu apt) aarch64-linux-gnu + arm-linux-gnueabi |" >> $GITHUB_STEP_SUMMARY
-          echo "| Assembler | GNU AS (LLVM_IAS=0) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cross Toolchain | GNU (Ubuntu apt) |" >> $GITHUB_STEP_SUMMARY
           echo "| KBUILD_BUILD_USER | ${{ env.KBUILD_BUILD_USER }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| KBUILD_BUILD_HOST | ${{ env.KBUILD_BUILD_HOST }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Defconfig | ${{ env.DEFCONFIG_NAME }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
