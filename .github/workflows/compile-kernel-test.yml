@@ -635,7 +635,7 @@ jobs:
           echo "[OK] DEBUG verification complete"
 
       # ================================================================
-      # 8c. Fix fs/proc/cmdline.c - relocate misplaced SUSFS injection
+      # 8c. Fix fs/proc/cmdline.c - remove ALL orphan SUSFS blocks & re-inject
       # ================================================================
       - name: "Fix fs/proc/cmdline.c SUSFS injection"
         run: |
@@ -645,12 +645,12 @@ jobs:
           [ ! -f "$FILE" ] && exit 0
 
           echo "======================================================"
-          echo "  BEFORE FIX: fs/proc/cmdline.c lines 25-70"
+          echo "  BEFORE FIX: fs/proc/cmdline.c FULL (with line numbers)"
           echo "======================================================"
-          awk 'NR>=25 && NR<=70 {printf "%3d: %s\n", NR, $0}' "$FILE"
+          awk '{printf "%3d: %s\n", NR, $0}' "$FILE"
           echo ""
 
-          echo "[FIX] Analyzing & fixing fs/proc/cmdline.c..."
+          echo "[FIX] Removing orphan SUSFS blocks & re-injecting properly..."
 
           python3 <<'PYEOF'
           from pathlib import Path
@@ -658,159 +658,162 @@ jobs:
 
           p = Path("fs/proc/cmdline.c")
           text = p.read_text()
+
+          # ================================================================
+          # STEP A: NUKE all #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG ... #endif blocks
+          # (both properly placed and orphan)
+          # We'll re-inject in correct location later
+          # ================================================================
+          print("[STEP A] Removing all existing SUSFS SPOOF_CMDLINE blocks...")
+
+          # Regex: match #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG ... #endif
+          # Non-greedy, but include newlines
+          pattern = re.compile(
+              r'\n*#ifdef\s+CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\b'
+              r'.*?'
+              r'#endif\s*(?://[^\n]*)?\n?',
+              re.DOTALL
+          )
+
+          matches = list(pattern.finditer(text))
+          print("  Found {} SUSFS SPOOF_CMDLINE block(s)".format(len(matches)))
+          for i, m in enumerate(matches):
+              start_line = text[:m.start()].count('\n') + 1
+              end_line = text[:m.end()].count('\n') + 1
+              print("    Block {}: line {} to {}".format(i+1, start_line, end_line))
+
+          text = pattern.sub('\n', text)
+
+          # Cleanup multiple blank lines
+          text = re.sub(r'\n{3,}', '\n\n', text)
+
+          # ================================================================
+          # STEP B: Also nuke any ORPHAN "if (static_branch_likely(&susfs_..." lines
+          # that are NOT inside proper function (top-level bare statements)
+          # ================================================================
+          print("")
+          print("[STEP B] Removing any remaining orphan SUSFS statements...")
+
+          # Match standalone lines that reference susfs_is_fake_cmdline
+          # in the pattern of `if (static_branch_likely(&susfs_...))` followed by block
+          # Wrapped by nothing or bare
           lines = text.split('\n')
-
-          # === STEP A: Deteksi misplaced SUSFS block ===
-          # Cari block yang isinya "if (static_branch_likely(&susfs_..." tapi TIDAK dalam function
-          # Cara deteksi: kalau block ini di antara `};` dan next `static int cmdline_proc_show` atau function definition
-
-          # Cari indeks baris yang problematic
-          susfs_blocks = []  # list of (start_line, end_line)
-          for i, line in enumerate(lines):
-              if 'static_branch_likely' in line and 'susfs_' in line:
-                  susfs_blocks.append(i)
-
-          print("  Found SUSFS static_branch_likely at lines: {}".format(
-              [b+1 for b in susfs_blocks]))
-
-          # === STEP B: Hapus BLOK yang orphan (bukan di dalam function) ===
-          # Kita cari misplaced block dan hapusnya
-          # Kemudian re-inject di lokasi yang benar (dalam cmdline_proc_show)
-
-          def is_inside_function(lines, line_idx):
-              """Cek apakah line_idx berada dalam function body."""
-              # Cari `{` yang lebih dekat sebelum line_idx yang bukan struct/enum
-              brace_count = 0
-              in_comment = False
-              for i in range(line_idx, -1, -1):
-                  l = lines[i]
-                  if '*/' in l:
-                      in_comment = True
-                  if '/*' in l:
-                      in_comment = False
-                  if in_comment:
-                      continue
-                  # Hitung braces
-                  brace_count += l.count('}') - l.count('{')
-                  if brace_count < 0:
-                      # Kita berada dalam `{`, cek apakah itu function
-                      # Cari baris sebelumnya yang mengandung `(` `)` `{`
-                      for j in range(i, -1, -1):
-                          prev = lines[j].strip()
-                          if not prev or prev.startswith('//') or prev.startswith('*') or prev.startswith('/*'):
-                              continue
-                          if '(' in prev and ')' in prev:
-                              # Kemungkinan function def
-                              return True
-                          if prev.endswith(';') or prev.endswith(','):
-                              # Struct member atau typedef
-                              return False
-                          if prev.startswith('struct') or prev.startswith('typedef') or prev.startswith('enum'):
-                              return False
-                      return False
-              return False
-
-          # === STEP C: SIMPLER APPROACH - Hapus block SUSFS orphan, lalu inject di function yg benar ===
-          # 1. Cari & hapus semua occurrence "if (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig...)"
-          #    yang tidak dalam function
-          # 2. Inject di function `cmdline_proc_show` yang benar
-
-          # Cari misplaced blocks (heuristik: kalau block muncul di antara `};` dan `static <type>`)
           new_lines = []
-          skip_until = -1
-          removed_blocks = 0
+          i = 0
+          brace_depth = 0
+          in_comment = False
+          removed_orphans = 0
 
-          for i, line in enumerate(lines):
-              if i <= skip_until:
-                  continue
-
+          while i < len(lines):
+              line = lines[i]
               stripped = line.strip()
 
-              # Deteksi orphan SUSFS block
-              if ('static_branch_likely' in line
-                  and 'susfs_is_fake_cmdline_or_bootconfig' in line
-                  and not is_inside_function(lines, i)):
-
-                  print("  [FOUND] Orphan SUSFS block at line {}".format(i+1))
-                  # Cari end of block: cari matching `}`
-                  brace_depth = 0
-                  block_end = i
-                  for j in range(i, len(lines)):
-                      brace_depth += lines[j].count('{') - lines[j].count('}')
-                      if brace_depth <= 0 and '{' in lines[i]:
-                          block_end = j
-                          break
-
-                  # Cari also #ifdef yang wrap block ini
-                  block_start = i
-                  for k in range(i-1, max(0, i-5), -1):
-                      if lines[k].strip().startswith('#ifdef'):
-                          block_start = k
-                          break
-
-                  # Extend block_end sampai #endif
-                  for j in range(block_end, min(len(lines), block_end+5)):
-                      if lines[j].strip() == '#endif' or lines[j].strip().startswith('#endif'):
-                          block_end = j
-                          break
-
-                  print("  Removing lines {}-{}".format(block_start+1, block_end+1))
-                  skip_until = block_end
-                  removed_blocks += 1
+              # Track comments (simplified)
+              if '/*' in line and '*/' not in line:
+                  in_comment = True
+              elif '*/' in line:
+                  in_comment = False
+                  new_lines.append(line)
+                  i += 1
                   continue
 
+              if in_comment:
+                  new_lines.append(line)
+                  i += 1
+                  continue
+
+              # Track brace depth (excluding braces in strings/comments - simplified)
+              # Remove strings and comments for counting
+              clean_line = re.sub(r'"[^"]*"', '""', line)
+              clean_line = re.sub(r"'[^']*'", "''", clean_line)
+              clean_line = re.sub(r'//.*$', '', clean_line)
+
+              # Check for orphan SUSFS block at depth 0
+              # Pattern: `if (static_branch_likely(&susfs_..._buffer_set))` at brace_depth 0
+              if (brace_depth == 0
+                  and 'static_branch_likely' in stripped
+                  and 'susfs_' in stripped):
+
+                  orphan_start = i
+                  # Find matching closing brace
+                  temp_depth = 0
+                  block_end = i
+                  for j in range(i, len(lines)):
+                      c_line = re.sub(r'"[^"]*"', '""', lines[j])
+                      c_line = re.sub(r'//.*$', '', c_line)
+                      temp_depth += c_line.count('{') - c_line.count('}')
+                      if temp_depth <= 0 and '{' in lines[j]:
+                          block_end = j
+                          break
+                      elif temp_depth <= 0 and j > i:
+                          block_end = j - 1
+                          break
+
+                  print("  [ORPHAN] Removing orphan SUSFS block at line {}-{}".format(
+                      orphan_start + 1, block_end + 1))
+                  removed_orphans += 1
+                  i = block_end + 1
+                  continue
+
+              # Update brace depth AFTER processing (so opening brace of function is counted)
+              brace_depth += clean_line.count('{') - clean_line.count('}')
+
               new_lines.append(line)
+              i += 1
 
-          if removed_blocks > 0:
+          if removed_orphans > 0:
               text = '\n'.join(new_lines)
-              p.write_text(text)
-              print("  [OK] Removed {} orphan SUSFS block(s)".format(removed_blocks))
-
-          # === STEP D: Inject SUSFS check dengan BENAR ke cmdline_proc_show ===
-          # Format yang benar (dari patch SUSFS 2.2.0 original):
-          #   static int cmdline_proc_show(struct seq_file *m, void *v) {
-          #   #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
-          #       if (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {
-          #           susfs_spoof_cmdline_or_bootconfig(m);
-          #           return 0;
-          #       }
-          #   #endif
-          #       // ...
-
-          text = p.read_text()
-
-          if 'susfs_spoof_cmdline_or_bootconfig' not in text:
-              # Inject di function cmdline_proc_show
-              # Cari function signature
-              pattern = re.compile(
-                  r'(static\s+int\s+cmdline_proc_show\s*\([^)]*\)\s*\{)',
-                  re.MULTILINE
-              )
-              m = pattern.search(text)
-              if m:
-                  injection = (
-                      m.group(0) + '\n'
-                      '#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n'
-                      '\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n'
-                      '\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n'
-                      '\t\treturn 0;\n'
-                      '\t}\n'
-                      '#endif'
-                  )
-                  text = text.replace(m.group(0), injection, 1)
-                  p.write_text(text)
-                  print("  [OK] Injected SUSFS check into cmdline_proc_show")
-              else:
-                  print("  [WARN] cmdline_proc_show function not found")
+              print("  [OK] Removed {} orphan SUSFS block(s)".format(removed_orphans))
           else:
-              print("  [INFO] SUSFS spoof already in file")
+              print("  [OK] No orphan blocks found")
+
+          # ================================================================
+          # STEP C: Inject SUSFS check in correct location (cmdline_proc_show)
+          # ================================================================
+          print("")
+          print("[STEP C] Injecting SUSFS check into cmdline_proc_show...")
+
+          # Cari signature cmdline_proc_show
+          func_pattern = re.compile(
+              r'(static\s+int\s+cmdline_proc_show\s*\([^)]*\)\s*\{)',
+              re.MULTILINE
+          )
+          m = func_pattern.search(text)
+
+          if m:
+              # Inject setelah opening brace
+              injection = (
+                  m.group(0) + '\n'
+                  '#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n'
+                  '\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n'
+                  '\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n'
+                  '\t\treturn 0;\n'
+                  '\t}\n'
+                  '#endif'
+              )
+              text = text.replace(m.group(0), injection, 1)
+              print("  [OK] Injected SUSFS check into cmdline_proc_show")
+          else:
+              print("  [WARN] cmdline_proc_show function not found")
+
+          # Save
+          p.write_text(text)
+          print("")
+          print("[DONE] fs/proc/cmdline.c fixed")
           PYEOF
 
           echo ""
           echo "======================================================"
-          echo "  AFTER FIX: fs/proc/cmdline.c lines 25-90"
+          echo "  AFTER FIX: fs/proc/cmdline.c FULL (with line numbers)"
           echo "======================================================"
-          awk 'NR>=25 && NR<=90 {printf "%3d: %s\n", NR, $0}' "$FILE"
+          awk '{printf "%3d: %s\n", NR, $0}' "$FILE"
+
+          echo ""
+          echo "======================================================"
+          echo "  Verify: no orphan static_branch_likely at top-level"
+          echo "======================================================"
+          # Cek apakah masih ada baris di top-level yg mengandung static_branch_likely
+          grep -n "static_branch_likely" "$FILE" | head -10 || echo "  (no matches)"
 
       # ================================================================
       # 9. Cleanup remaining reject files
