@@ -264,11 +264,51 @@ jobs:
               for f in glob.glob(pattern, recursive=True):
                   source_files.append(Path(f))
 
+          # JUGA scan file yang ke-patch SUSFS (untuk pick up definition yang mungkin di sana)
+          for pattern in ["fs/open.c", "fs/exec.c", "fs/read_write.c", "fs/stat.c",
+                          "fs/namespace.c"]:
+              p = Path(pattern)
+              if p.exists():
+                  source_files.append(p)
+
           print("[INFO] Scanning {} source files".format(len(source_files)))
 
           static_keys_true = set()
           static_keys_false = set()
           funcs = {}
+
+          # PATTERN yang lebih permissive untuk return type
+          # Match: [static] [inline] <return_type_with_pointer> susfs_xxx(params) {
+          # Return type bisa: bool, void, int, long, unsigned X, struct X, dengan * di manapun
+          FUNC_DEF_PATTERN = re.compile(
+              r'^(?!\s*//|\s*\*|\s*/\*)'                        # skip komentar
+              r'(?:__\w+\s+)?'                                   # attribute like __must_check
+              r'(?:inline\s+)?'                                  # optional inline
+              r'('                                               # GROUP 1: return type
+              r'(?:struct\s+\w+|bool|void|int|long|size_t|ssize_t|unsigned(?:\s+\w+)?)'
+              r'\s*\**\s*'                                       # pointers: 0+ * with whitespace
+              r')'
+              r'(susfs_\w+)'                                     # GROUP 2: function name
+              r'\s*\('                                           # opening paren
+              r'([^)]*)'                                         # GROUP 3: params
+              r'\)\s*\{',                                        # ) {
+              re.MULTILINE
+          )
+
+          # Prototype pattern (dengan ;)
+          FUNC_PROTO_PATTERN = re.compile(
+              r'^(?!\s*//|\s*\*|\s*/\*)'
+              r'(?:extern\s+)?'
+              r'('
+              r'(?:struct\s+\w+|bool|void|int|long|size_t|ssize_t|unsigned(?:\s+\w+)?)'
+              r'\s*\**\s*'
+              r')'
+              r'(susfs_\w+)'
+              r'\s*\('
+              r'([^)]*)'
+              r'\)\s*;',
+              re.MULTILINE
+          )
 
           for f in source_files:
               try:
@@ -281,40 +321,34 @@ jobs:
               for name in re.findall(r'DEFINE_STATIC_KEY_FALSE\s*\(\s*(\w+)\s*\)', text):
                   static_keys_false.add(name)
 
-              # Function definitions (skip static)
-              for m in re.finditer(
-                  r'^(?:__\w+\s+)?(?:inline\s+)?'
-                  r'(bool|void|int|long|unsigned\s+\w+|struct\s+\w+\s*\*?)\s+'
-                  r'(susfs_\w+)\s*\(([^)]*)\)\s*\{',
-                  text, re.MULTILINE
-              ):
+              # Function definitions
+              for m in FUNC_DEF_PATTERN.finditer(text):
                   rettype = m.group(1).strip()
+                  # Normalisasi spasi (misal "struct  filename  *" -> "struct filename *")
+                  rettype = re.sub(r'\s+', ' ', rettype).strip()
                   name = m.group(2)
                   params = m.group(3).strip()
 
-                  # Skip kalau ada "static" di baris yang sama
+                  # Skip kalau static (private ke file)
                   start = max(0, m.start() - 100)
                   preamble = text[start:m.start()]
                   last_newline = preamble.rfind('\n')
                   same_line = preamble[last_newline:] if last_newline >= 0 else preamble
-                  if 'static' in same_line:
+                  if re.search(r'\bstatic\b', same_line):
                       continue
 
                   funcs[name] = (rettype, params)
 
-              # Prototype dari header
-              for m in re.finditer(
-                  r'^(?:extern\s+)?'
-                  r'(bool|void|int|long|unsigned\s+\w+|struct\s+\w+\s*\*?)\s+'
-                  r'(susfs_\w+)\s*\(([^)]*)\)\s*;',
-                  text, re.MULTILINE
-              ):
+              # Prototypes (fallback kalau tidak ada definition)
+              for m in FUNC_PROTO_PATTERN.finditer(text):
                   rettype = m.group(1).strip()
+                  rettype = re.sub(r'\s+', ' ', rettype).strip()
                   name = m.group(2)
                   params = m.group(3).strip()
                   if name not in funcs:
                       funcs[name] = (rettype, params)
 
+          # Build header
           header = [
               '/* Auto-generated SUSFS extern header */',
               '#ifndef __SUSFS_EXTERN_H',
@@ -343,7 +377,13 @@ jobs:
 
           for name in sorted(funcs.keys()):
               rettype, params = funcs[name]
-              header.append('extern {} {}({});'.format(rettype, name, params))
+              # Format return type: pastikan ada space sebelum function name kalau perlu
+              # (misal "struct filename*" -> "struct filename *")
+              if rettype.endswith('*'):
+                  formatted = '{} {}({});'.format(rettype, name, params)
+              else:
+                  formatted = '{} {}({});'.format(rettype, name, params)
+              header.append('extern ' + formatted)
 
           header.append('')
           header.append('#endif /* __SUSFS_EXTERN_H */')
@@ -355,6 +395,13 @@ jobs:
           print("  Static keys (true):  {}".format(len(static_keys_true)))
           print("  Static keys (false): {}".format(len(static_keys_false)))
           print("  Functions:           {}".format(len(funcs)))
+
+          # Print ALL functions for debugging
+          print("")
+          print("== ALL functions in header ==")
+          for name in sorted(funcs.keys()):
+              rettype, params = funcs[name]
+              print("  extern {} {}({});".format(rettype, name, params))
           PYEOF
 
           # ================================================================
