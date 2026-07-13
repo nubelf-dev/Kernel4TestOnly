@@ -21,14 +21,13 @@ on:
         description: "Versi kernel (untuk info)"
         type: string
         required: false
-        default: "unknown"
+        default: "4.9.337"
       create_release:
         description: "Auto-create GitHub Release?"
         type: boolean
         required: false
         default: false
 
-  # Bisa dipanggil manual juga untuk testing
   workflow_dispatch:
     inputs:
       artifact_name:
@@ -70,7 +69,7 @@ jobs:
           path: AnyKernel3
 
       # ================================================================
-      # 2. Download kernel artifact dari job compile
+      # 2. Download kernel artifact
       # ================================================================
       - name: Download kernel artifact
         uses: actions/download-artifact@v4
@@ -101,122 +100,145 @@ jobs:
 
           # Cleanup unnecessary files
           cd AnyKernel3
-          rm -rf .git .github README.md
-          rm -rf ramdisk patch
-          rm -f Image Image.gz zImage zImage-dtb
+          rm -rf .git .github README.md LICENSE
+          rm -rf modules patch ramdisk
+          rm -f Image Image.gz Image.gz-dtb zImage dtbo.img
 
           echo "[OK] Kernel image placed in AnyKernel3/"
           ls -lh Image.gz-dtb
 
       # ================================================================
-      # 4. Configure anykernel.sh untuk device tertentu
+      # 4. Configure anykernel.sh (proven format)
       # ================================================================
       - name: Configure anykernel.sh
         run: |
           cd AnyKernel3
 
-          cat > anykernel.sh <<'EOF'
-          #!/sbin/sh
-          #
-          # AnyKernel3 - BaikalOS Kernel Installer
-          # Kernel: ReSukiSU + SUSFS 2.2.0
-          #
-          
-          ## AnyKernel setup
-          # begin properties
+          # Kernel string
+          KERNEL_STRING="BaikalOS A13 ${{ inputs.device_display_name }} ReSukiSU + SUSFS 2.2.0 Kernel | Linux version ${{ inputs.kernel_version }}-perf (${{ github.repository_owner }})"
+
+          # Write anykernel.sh dengan format yang proven boot
+          cat > anykernel.sh <<EOF
+          ### AnyKernel3 Ramdisk Mod Script
+          ## osm0sis @ xda-developers
+
+          ### AnyKernel setup
+          # global properties
           properties() { '
-          kernel.string=BaikalOS 13.0 Kernel by Nerf (ReSukiSU + SUSFS 2.2.0)
+          kernel.string=${KERNEL_STRING}
           do.devicecheck=1
           do.modules=0
           do.systemless=1
           do.cleanup=1
           do.cleanuponabort=0
-          device.name1=DEVICE_CODENAME
-          device.name2=DEVICE_DISPLAY
-          device.name3=Pocophone_F1
-          device.name4=poco_f1
+          device.name1=${{ inputs.device_name }}
+          device.name2=${{ inputs.device_display_name }}
+          device.name3=PocoF1
+          device.name4=Pocophone_F1
+          device.name5=
           supported.versions=
           supported.patchlevels=
+          supported.vendorpatchlevels=
           '; } # end properties
-          
-          # shell variables
-          block=/dev/block/bootdevice/by-name/boot;
-          is_slot_device=0;
-          ramdisk_compression=auto;
-          patch_vbmeta_flag=auto;
-          
-          
-          ## AnyKernel install
+
+
+          ### AnyKernel install
+          ## boot files attributes
+          boot_attributes() {
+          set_perm_recursive 0 0 755 644 \$RAMDISK/*;
+          set_perm_recursive 0 0 750 750 \$RAMDISK/init* \$RAMDISK/sbin;
+          } # end attributes
+
+          # boot shell variables
+          BLOCK=/dev/block/bootdevice/by-name/boot;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
           . tools/ak3-core.sh;
-          
-          # boot shell scripts
-          split_boot;
-          
-          # begin ramdisk changes
-          # (no ramdisk mods needed for this kernel)
-          # end ramdisk changes
-          
+
+          # boot install
+          dump_boot;
+
           write_boot;
-          ## end install
+          ## end boot install
           EOF
 
-          # Replace placeholder dengan nilai dari input
-          sed -i "s|DEVICE_CODENAME|${{ inputs.device_name }}|g" anykernel.sh
-          sed -i "s|DEVICE_DISPLAY|${{ inputs.device_display_name }}|g" anykernel.sh
-
-          echo "[OK] anykernel.sh configured"
-          cat anykernel.sh | head -20
+          echo "[OK] anykernel.sh configured (proven format)"
+          echo ""
+          echo "== Preview anykernel.sh =="
+          cat anykernel.sh
 
       # ================================================================
-      # 5. Bikin flashable ZIP
+      # 5. Verifikasi struktur AnyKernel3
       # ================================================================
-      - name: Create flashable ZIP
+      - name: Verify AnyKernel3 structure
+        run: |
+          cd AnyKernel3
+
+          echo "== Struktur folder AnyKernel3 =="
+          ls -la
+
+          echo ""
+          echo "== Files kritikal =="
+          for f in Image.gz-dtb anykernel.sh META-INF/com/google/android/update-binary tools/ak3-core.sh; do
+            if [ -f "$f" ]; then
+              SIZE=$(du -h "$f" | cut -f1)
+              echo "  [OK] $f ($SIZE)"
+            else
+              echo "  [FAIL] $f MISSING!"
+              exit 1
+            fi
+          done
+
+      # ================================================================
+      # 6. UPLOAD AS FOLDER (NO DOUBLE ZIP!)
+      # Trick: upload isi folder, GitHub bikin ZIP wrapper yang isinya
+      # bisa langsung di-flash TWRP tanpa extract lagi
+      # ================================================================
+      - name: Upload flashable ZIP (no double wrap)
+        uses: actions/upload-artifact@v4
+        with:
+          # Format: BaikalOS13-ReSukiSU-SUSFS-PocoF1-YYYYMMDD-HHMM-commit
+          name: BaikalOS13-ReSukiSU-SUSFS-${{ inputs.device_display_name }}-${{ github.run_number }}
+          # Upload SEMUA ISI folder AnyKernel3 (bukan folder-nya sendiri)
+          path: AnyKernel3/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9   # Max compression
+
+      # ================================================================
+      # 7. (Optional) Create standalone ZIP untuk GitHub Release
+      # Kalau mau create_release, kita perlu file ZIP terpisah
+      # ================================================================
+      - name: Create standalone ZIP for Release
+        if: inputs.create_release == true
         id: zip
         run: |
-          # Generate timestamp
           BUILD_DATE=$(date +%Y%m%d-%H%M)
           COMMIT_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
-
-          # Nama file ZIP
           ZIP_NAME="BaikalOS13-ReSukiSU-SUSFS-${{ inputs.device_display_name }}-${BUILD_DATE}-${COMMIT_SHORT}.zip"
 
           cd AnyKernel3
-          zip -r9 "../${ZIP_NAME}" . -x ".git*" -x "README.md" -x "*.md"
+          # Zip isi folder (bukan folder itu sendiri)
+          zip -r9 "../${ZIP_NAME}" . -x ".git*" -x "*.md"
           cd ..
 
-          # Verify ZIP
-          if [ ! -f "${ZIP_NAME}" ]; then
-            echo "[FAIL] ZIP not created!"
-            exit 1
-          fi
-
           SIZE=$(du -h "${ZIP_NAME}" | cut -f1)
-          echo "[OK] Flashable ZIP created: ${ZIP_NAME} (${SIZE})"
+          echo "[OK] Standalone ZIP: ${ZIP_NAME} (${SIZE})"
 
-          # Export ke GITHUB_OUTPUT untuk step berikutnya
           echo "zip_name=${ZIP_NAME}" >> $GITHUB_OUTPUT
           echo "zip_size=${SIZE}" >> $GITHUB_OUTPUT
           echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
           echo "commit_short=${COMMIT_SHORT}" >> $GITHUB_OUTPUT
 
-          # List isi ZIP
           echo ""
-          echo "== Isi ZIP =="
+          echo "== Isi ZIP (harus sama dengan struktur AnyKernel3) =="
           unzip -l "${ZIP_NAME}"
 
       # ================================================================
-      # 6. Upload flashable ZIP sebagai artifact
-      # ================================================================
-      - name: Upload flashable ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: flashable-zip
-          path: ${{ steps.zip.outputs.zip_name }}
-          if-no-files-found: error
-          retention-days: 30
-
-      # ================================================================
-      # 7. (Optional) Create GitHub Release
+      # 8. Create GitHub Release
       # ================================================================
       - name: Create GitHub Release
         if: inputs.create_release == true
@@ -225,45 +247,66 @@ jobs:
           tag_name: kernel-build-${{ github.run_number }}
           name: "BaikalOS Kernel Build #${{ github.run_number }} - ${{ steps.zip.outputs.build_date }}"
           body: |
-            # 🚀 BaikalOS 13.0 Kernel Build
-            
-            **Kernel**: 4.9.337 (${{ inputs.kernel_version }})
-            **Device**: ${{ inputs.device_display_name }} (${{ inputs.device_name }})
+            # 🚀 BaikalOS 13.0 Kernel
+
+            **Kernel Version**: ${{ inputs.kernel_version }}
+            **Device**: ${{ inputs.device_display_name }} (`${{ inputs.device_name }}`)
             **Root**: ReSukiSU (manual hook, 7 hooks)
             **SUSFS**: v2.2.0
-            **Build Date**: ${{ steps.zip.outputs.build_date }}
+            **Build**: `#${{ github.run_number }}` @ ${{ steps.zip.outputs.build_date }}
             **Commit**: `${{ steps.zip.outputs.commit_short }}`
-            **Build**: `${{ github.run_id }}`
-            
-            ## 📦 Download
-            
-            Download `${{ steps.zip.outputs.zip_name }}` di bawah.
-            
+
+            ## 📥 Download
+
+            **Langsung download `${{ steps.zip.outputs.zip_name }}` di bawah** — file sudah dalam format flashable ZIP siap pakai.
+
             ## 🔧 Cara Flash
-            
-            ### Via TWRP/OrangeFox:
-            1. Backup boot.img asli dulu (**PENTING!**)
-            2. Boot ke TWRP/OrangeFox
-            3. Install ZIP → pilih file yang di-download
-            4. Reboot
-            
-            ### Via Magisk (kalau device sudah rooted):
-            1. Buka Magisk Manager
-            2. Modules → Install from storage
-            3. Pilih ZIP → Reboot
-            
-            ## ⚠️ Warning
-            
-            - Kernel ini **TESTING**, gunakan dengan resiko sendiri
-            - Kompatibel hanya dengan **BaikalOS 13.0** (jangan flash di ROM lain)
-            - Butuh unlocked bootloader
-            
+
+            ### Via TWRP/OrangeFox Recovery:
+            1. ⚠️ **BACKUP boot.img asli dulu!**
+            2. Copy ZIP ke internal storage
+            3. Boot ke TWRP/OrangeFox
+            4. **Install** → pilih ZIP → **Swipe to Confirm**
+            5. **Reboot System**
+
+            ### Via Fastboot (Manual):
+            1. Extract ZIP
+            2. Extract boot.img asli: `magiskboot unpack boot.img`
+            3. Replace `kernel` dengan `Image.gz-dtb`
+            4. Repack: `magiskboot repack boot.img`
+            5. Flash: `fastboot flash boot new-boot.img`
+
             ## 📋 Features
-            
+
             - ✅ ReSukiSU root solution (manual hook mode)
-            - ✅ SUSFS 2.2.0 (magic mount, sus path, sus mount, dll)
-            - ✅ Play Integrity friendly (butuh TrickyStore module)
-            - ✅ Support Poco F1 (beryllium)
+            - ✅ SUSFS 2.2.0 dengan features:
+              - Magic Mount
+              - Sus Path / Mount / Kstat / Map
+              - Spoof Uname / Cmdline / Bootconfig
+              - Open Redirect
+              - Hide KSU/SUSFS symbols
+            - ✅ 7 Manual hooks terintegrasi:
+              - `execveat`, `faccessat`, `stat`, `sys_read`
+              - `setresuid`, `sys_reboot`, `input_handle_event`
+
+            ## ⚠️ Requirements
+
+            - **ROM**: BaikalOS 13.0 (jangan flash di ROM lain!)
+            - **Bootloader**: Unlocked
+            - **Recovery**: TWRP/OrangeFox terinstall
+            - **Device**: Poco F1 (beryllium) SDM845
+
+            ## 🔒 For Play Integrity
+
+            1. Install ReSukiSU Manager: [Download](https://github.com/ReSukiSU/ReSukiSU/releases)
+            2. Grant su ke aplikasi yang butuh root
+            3. Install **TrickyStore** module dari LSPosed/Zygisk untuk PIF
+            4. Test dengan **Play Integrity Info** / **YASNAC**
+
+            ---
+
+            🔗 **Source**: [${{ github.repository }}](https://github.com/${{ github.repository }})
+            🏗️ **Build Log**: [Run #${{ github.run_number }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
           files: ${{ steps.zip.outputs.zip_name }}
           draft: false
           prerelease: true
@@ -272,7 +315,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ================================================================
-      # 8. Job summary
+      # 9. Job summary
       # ================================================================
       - name: Job summary
         if: always()
@@ -281,20 +324,22 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| ZIP Name | \`${{ steps.zip.outputs.zip_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Size | ${{ steps.zip.outputs.zip_size }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Device | ${{ inputs.device_display_name }} (${{ inputs.device_name }}) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Build Date | ${{ steps.zip.outputs.build_date }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Commit | \`${{ steps.zip.outputs.commit_short }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Device | ${{ inputs.device_display_name }} (\`${{ inputs.device_name }}\`) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kernel Version | ${{ inputs.kernel_version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Number | #${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Auto-Release | ${{ inputs.create_release }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📥 Download Instructions" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 📥 Cara Download & Flash" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Scroll ke bagian **Artifacts** di run summary, download \`flashable-zip\`" >> $GITHUB_STEP_SUMMARY
+          echo "1. Scroll ke bagian **Artifacts** di run summary" >> $GITHUB_STEP_SUMMARY
+          echo "2. Download \`BaikalOS13-ReSukiSU-SUSFS-${{ inputs.device_display_name }}-${{ github.run_number }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. **File yang di-download SUDAH FLASHABLE** — tidak perlu extract dulu" >> $GITHUB_STEP_SUMMARY
+          echo "4. Copy ZIP ke device, flash via TWRP" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🔧 Flash Instructions" >> $GITHUB_STEP_SUMMARY
+
+          echo "### ⚠️ Sebelum Flash" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. Extract ZIP untuk dapatkan flashable ZIP file" >> $GITHUB_STEP_SUMMARY
-          echo "2. Boot ke TWRP/OrangeFox recovery" >> $GITHUB_STEP_SUMMARY
-          echo "3. Install → pilih ZIP → Confirm swipe" >> $GITHUB_STEP_SUMMARY
-          echo "4. Reboot System" >> $GITHUB_STEP_SUMMARY
+          echo "- **BACKUP boot.img asli dulu** via TWRP" >> $GITHUB_STEP_SUMMARY
+          echo "- Pastikan ROM = **BaikalOS 13.0**" >> $GITHUB_STEP_SUMMARY
+          echo "- Bootloader **unlocked**" >> $GITHUB_STEP_SUMMARY
