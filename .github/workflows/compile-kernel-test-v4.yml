@@ -827,10 +827,14 @@ jobs:
       # ================================================================
       # 17. Upload BOTH artifacts (raw Image + flashable ZIP)
       # ================================================================
+      - name: Get timestamp
+        id: timestamp
+        run: echo "datetime=$(TZ='Asia/Jakarta' date +'%d%m%Y-%H%M')" >> $GITHUB_OUTPUT
+
       - name: Upload flashable ZIP (siap flash)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.zip_name }}-$(date -u +%Y%m%d-%H%M)
+          name: ${{ github.event.inputs.zip_name }}-${{ steps.timestamp.outputs.datetime }}
           path: ak3-build/*
           if-no-files-found: error
           retention-days: 30
@@ -839,7 +843,7 @@ jobs:
       - name: Upload raw Image.gz-dtb (untuk manual repack)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.zip_name }}-image-$(date -u +%Y%m%d-%H%M)
+          name: ${{ github.event.inputs.zip_name }}-image-${{ steps.timestamp.outputs.datetime }}
           path: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
           if-no-files-found: error
           retention-days: 7
@@ -865,8 +869,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 📦 Artifacts:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. **\`${{ github.event.inputs.zip_name }}-$(date -u +%Y%m%d-%H%M)\`** — 🎯 **FLASHABLE ZIP** (siap flash via TWRP)" >> $GITHUB_STEP_SUMMARY
-          echo "2. **\`${{ github.event.inputs.zip_name }}-image-$(date -u +%Y%m%d-%H%M)\`** — raw Image.gz-dtb (untuk manual repack boot.img)" >> $GITHUB_STEP_SUMMARY
+          echo "1. **\`${{ github.event.inputs.zip_name }}-${{ steps.timestamp.outputs.datetime }}\`** — 🎯 **FLASHABLE ZIP** (siap flash via TWRP)" >> $GITHUB_STEP_SUMMARY
+          echo "2. **\`${{ github.event.inputs.zip_name }}-image-${{ steps.timestamp.outputs.datetime }}\`** — raw Image.gz-dtb (untuk manual repack boot.img)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 🔧 Cara Flash:" >> $GITHUB_STEP_SUMMARY
           echo "1. Download **flashable** ZIP" >> $GITHUB_STEP_SUMMARY
