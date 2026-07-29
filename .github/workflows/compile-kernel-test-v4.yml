@@ -229,6 +229,7 @@ jobs:
 
           static_keys_true = set()
           static_keys_false = set()
+          srcu_structs = set()      # ← BARU: SRCU structs
           funcs = {}
 
           FUNC_DEF_PATTERN = re.compile(
@@ -252,11 +253,17 @@ jobs:
               except Exception:
                   continue
 
+              # Static keys
               for name in re.findall(r'DEFINE_STATIC_KEY_TRUE\s*\(\s*(\w+)\s*\)', text):
                   static_keys_true.add(name)
               for name in re.findall(r'DEFINE_STATIC_KEY_FALSE\s*\(\s*(\w+)\s*\)', text):
                   static_keys_false.add(name)
 
+              # SRCU structs (BARU)
+              for name in re.findall(r'DEFINE_SRCU\s*\(\s*(\w+)\s*\)', text):
+                  srcu_structs.add(name)
+
+              # Function definitions
               for m in FUNC_DEF_PATTERN.finditer(text):
                   rettype = re.sub(r'\s+', ' ', m.group(1).strip())
                   name = m.group(2)
@@ -282,12 +289,14 @@ jobs:
               '#define __SUSFS_EXTERN_H',
               '#include <linux/types.h>',
               '#include <linux/jump_label.h>',
+              '#include <linux/srcu.h>',                    # ← BARU
               '/* Forward declarations */',
               'struct inode;', 'struct kstat;', 'struct path;', 'struct dentry;',
               'struct file;', 'struct filename;', 'struct vfsmount;',
               'struct super_block;', 'struct mount;', 'struct seq_file;',
               'struct task_struct;', 'struct vm_area_struct;', 'struct mm_struct;',
               'struct pt_regs;', 'struct linux_binprm;', 'struct new_utsname;',
+              'struct srcu_struct;',                        # ← BARU
               '',
               '/* Static keys */',
           ]
@@ -295,6 +304,14 @@ jobs:
               header.append(f'extern struct static_key_true {name};')
           for name in sorted(static_keys_false):
               header.append(f'extern struct static_key_false {name};')
+
+          # BARU: SRCU structs
+          if srcu_structs:
+              header.append('')
+              header.append('/* SRCU structs */')
+              for name in sorted(srcu_structs):
+                  header.append(f'extern struct srcu_struct {name};')
+
           header.append('')
           header.append('/* Functions */')
           for name in sorted(funcs.keys()):
@@ -304,8 +321,14 @@ jobs:
           header.append('#endif')
 
           Path("include/linux/susfs_extern.h").write_text('\n'.join(header))
-          print(f"[OK] Generated: {len(static_keys_true)+len(static_keys_false)} keys, {len(funcs)} functions")
+          print(f"[OK] Generated:")
+          print(f"  Static keys (true):  {len(static_keys_true)}")
+          print(f"  Static keys (false): {len(static_keys_false)}")
+          print(f"  SRCU structs:        {len(srcu_structs)}")   # ← BARU
+          print(f"  Functions:           {len(funcs)}")
           PYEOF
+
+          # ... rest of step 8 (STEP 2, STEP 3, dst) tetap sama ...
 
           # STEP 2: Fix proc_namespace.c include
           if [ -f fs/proc_namespace.c ] && ! grep -q "susfs_def.h" fs/proc_namespace.c; then
@@ -747,6 +770,96 @@ jobs:
           echo "[OK] Kernel version: ${KERNEL_VERSION_STRING}"
 
       # ================================================================
+      # 15b. Extract ReSukiSU + SUSFS build info dari log
+      # ================================================================
+      - name: Extract ReSukiSU version info
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+
+          echo "======================================================"
+          echo "  Extract ReSukiSU + SUSFS Build Info"
+          echo "======================================================"
+
+          # 1. Ekstrak dari file build log (kalau ada)
+          KSU_VERSION_CODE="unknown"
+          KSU_VERSION_NAME="unknown"
+          KSU_KERNEL_VERSION="unknown"
+          KSU_KERNEL_TYPE="unknown"
+          KSU_HOOK_TYPE="unknown"
+          SUSFS_VERSION="unknown"
+
+          # ReSukiSU info biasanya print via cmake/scripts saat compile
+          # Cek dari beberapa lokasi
+          for LOG in out/.config out/include/generated/compile.h; do
+            [ ! -f "$LOG" ] && continue
+            grep -E "KSU_VERSION|SUSFS_VERSION" "$LOG" 2>/dev/null || true
+          done
+
+          # Ekstrak dari KernelSU source
+          if [ -d KernelSU/kernel ]; then
+            # Version code
+            if [ -f KernelSU/kernel/Makefile ]; then
+              KSU_VC=$(grep -oP 'KSU_VERSION\s*[?:]?=\s*\K[0-9]+' KernelSU/kernel/Makefile 2>/dev/null | head -1)
+              [ -n "$KSU_VC" ] && KSU_VERSION_CODE="$KSU_VC"
+            fi
+
+            # Kernel type
+            if grep -q "GKI" KernelSU/kernel/Kconfig 2>/dev/null; then
+              KSU_KERNEL_TYPE="GKI"
+            else
+              KSU_KERNEL_TYPE="Non-GKI"
+            fi
+          fi
+
+          # Ekstrak dari susfs source
+          if [ -f fs/susfs.c ]; then
+            SUSFS_VER=$(grep -oP '#define\s+SUSFS_VERSION\s+"\K[^"]+' fs/susfs.c 2>/dev/null | head -1)
+            [ -n "$SUSFS_VER" ] && SUSFS_VERSION="$SUSFS_VER"
+          fi
+          if [ -f include/linux/susfs.h ]; then
+            SUSFS_VER=$(grep -oP '#define\s+SUSFS_VERSION\s+"\K[^"]+' include/linux/susfs.h 2>/dev/null | head -1)
+            [ -n "$SUSFS_VER" ] && SUSFS_VERSION="$SUSFS_VER"
+          fi
+
+          # Kernel version (X.Y)
+          KERNEL_MAJOR=$(make kernelversion 2>/dev/null | grep -oP '^[0-9]+\.[0-9]+' | head -1)
+          [ -n "$KERNEL_MAJOR" ] && KSU_KERNEL_VERSION="$KERNEL_MAJOR"
+
+          # Hook type
+          if grep -q "CONFIG_KSU_MANUAL_HOOK=y" out/.config 2>/dev/null; then
+            KSU_HOOK_TYPE="Manual hook"
+          elif grep -q "CONFIG_KPROBES=y" out/.config 2>/dev/null; then
+            KSU_HOOK_TYPE="Kprobe hook"
+          fi
+
+          # Version name (kalau ada di git)
+          if [ -d KernelSU ]; then
+            cd KernelSU
+            KSU_VN=$(git describe --tags --abbrev=8 2>/dev/null || git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
+            KSU_VN_FULL="v${KSU_VC:-unknown}-${KSU_VN}@ReSukiSU"
+            KSU_VERSION_NAME="$KSU_VN_FULL"
+            cd ..
+          fi
+
+          # Print info
+          echo ""
+          echo "  -- ReSukiSU version code: $KSU_VERSION_CODE"
+          echo "  -- ReSukiSU version name: $KSU_VERSION_NAME"
+          echo "  -- KERNEL_VERSION: $KSU_KERNEL_VERSION"
+          echo "  -- KERNEL_TYPE: $KSU_KERNEL_TYPE"
+          echo "  -- Hook Type: $KSU_HOOK_TYPE"
+          echo "  -- SUSFS_VERSION: $SUSFS_VERSION"
+          echo ""
+
+          # Export ke GITHUB_ENV untuk dipakai di summary
+          echo "KSU_VERSION_CODE=${KSU_VERSION_CODE}" >> $GITHUB_ENV
+          echo "KSU_VERSION_NAME=${KSU_VERSION_NAME}" >> $GITHUB_ENV
+          echo "KSU_KERNEL_VERSION=${KSU_KERNEL_VERSION}" >> $GITHUB_ENV
+          echo "KSU_KERNEL_TYPE=${KSU_KERNEL_TYPE}" >> $GITHUB_ENV
+          echo "KSU_HOOK_TYPE=${KSU_HOOK_TYPE}" >> $GITHUB_ENV
+          echo "SUSFS_VERSION_STR=${SUSFS_VERSION}" >> $GITHUB_ENV
+
+      # ================================================================
       # 16. Package to Flashable ZIP (INLINE, dalam workflow yang sama)
       # ================================================================
       - name: Package to AnyKernel3 Flashable ZIP
@@ -849,31 +962,85 @@ jobs:
           retention-days: 7
 
       # ================================================================
-      # 18. Build summary
+      # 18. Build summary (enhanced dengan info manager APK)
       # ================================================================
       - name: Build summary
         if: always()
         run: |
-          echo "## 🚀 Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## 🚀 BaikalOS Kernel Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 📦 Build Info" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Zip Name | \`${{ github.event.inputs.zip_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Kernel Source | \`${{ env.KERNEL_REPO }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Name | \`${{ github.event.inputs.zip_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Number | #${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Date | $(TZ='Asia/Jakarta' date +'%Y-%m-%d %H:%M WIB') |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 🐧 Kernel Info" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Kernel Source | [baikalos/android_kernel_xiaomi_sdm845](${{ env.KERNEL_REPO }}) |" >> $GITHUB_STEP_SUMMARY
           echo "| Kernel Branch | \`${{ env.KERNEL_BRANCH }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Kernel Commit | \`${KERNEL_COMMIT:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Kernel Version | \`${KERNEL_VERSION_STRING:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Root Solution | ReSukiSU (7 manual hooks) |" >> $GITHUB_STEP_SUMMARY
-          echo "| SUSFS | v2.2.0 |" >> $GITHUB_STEP_SUMMARY
-          echo "| Kernel String (anykernel.sh) | \`${{ github.event.inputs.kernel_string }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| KERNEL_VERSION | \`${KSU_KERNEL_VERSION:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| KERNEL_TYPE | \`${KSU_KERNEL_TYPE:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Defconfig | \`${{ env.DEFCONFIG_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📦 Artifacts:" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 🔐 Root Solution: ReSukiSU" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. **\`${{ github.event.inputs.zip_name }}-${{ steps.timestamp.outputs.datetime }}\`** — 🎯 **FLASHABLE ZIP** (siap flash via TWRP)" >> $GITHUB_STEP_SUMMARY
-          echo "2. **\`${{ github.event.inputs.zip_name }}-image-${{ steps.timestamp.outputs.datetime }}\`** — raw Image.gz-dtb (untuk manual repack boot.img)" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Version Code | \`${KSU_VERSION_CODE:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version Name | \`${KSU_VERSION_NAME:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Hook Type | \`${KSU_HOOK_TYPE:-unknown}\` (7 hooks) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source | [ReSukiSU](${{ env.RESUKISU_REPO }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch/Tag | \`${{ github.event.inputs.resukisu_branch || 'main' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🔧 Cara Flash:" >> $GITHUB_STEP_SUMMARY
-          echo "1. Download **flashable** ZIP" >> $GITHUB_STEP_SUMMARY
-          echo "2. Copy ke device" >> $GITHUB_STEP_SUMMARY
-          echo "3. Boot ke TWRP" >> $GITHUB_STEP_SUMMARY
-          echo "4. Install ZIP → Reboot" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 🛡️ SUSFS" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${SUSFS_VERSION_STR:-v2.2.0}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Features Enabled | Magic Mount, Sus Path/Mount/Kstat/Map, Spoof Uname/Cmdline, Open Redirect |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 📥 Manager APK yang Kompatibel" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download manager APK dari salah satu source berikut (pilih **versi yang sesuai** dengan version code kernel: \`${KSU_VERSION_CODE:-unknown}\`):" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **[ReSukiSU (official)](https://github.com/ReSukiSU/ReSukiSU/releases)**" >> $GITHUB_STEP_SUMMARY
+          echo "- **[SukiSU-Ultra](https://github.com/ShirkNeko/SukiSU-Ultra/releases)** (compatible manager)" >> $GITHUB_STEP_SUMMARY
+          echo "- **[MKSU](https://github.com/5ec1cff/KernelSU/releases)** (compatible manager)" >> $GITHUB_STEP_SUMMARY
+          echo "- **[RKSU](https://github.com/rifsxd/KernelSU-Next/releases)** (compatible manager)" >> $GITHUB_STEP_SUMMARY
+          echo "- **[KOWSU](https://github.com/KOWX712/KernelSU/releases)** (compatible manager)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 📦 Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. **\`${{ github.event.inputs.zip_name }}-${{ steps.timestamp.outputs.datetime }}\`** — 🎯 **FLASHABLE ZIP** (siap flash TWRP)" >> $GITHUB_STEP_SUMMARY
+          echo "2. **\`${{ github.event.inputs.zip_name }}-image-${{ steps.timestamp.outputs.datetime }}\`** — raw \`Image.gz-dtb\` (untuk manual repack)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 🎨 Kernel String di AnyKernel3" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "${{ github.event.inputs.kernel_string }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 🔧 Cara Flash" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. ⚠️ **BACKUP boot.img asli dulu** via TWRP" >> $GITHUB_STEP_SUMMARY
+          echo "2. Download flashable ZIP → copy ke device" >> $GITHUB_STEP_SUMMARY
+          echo "3. Boot ke TWRP/OrangeFox recovery" >> $GITHUB_STEP_SUMMARY
+          echo "4. **Install** → pilih ZIP → **Swipe to Confirm**" >> $GITHUB_STEP_SUMMARY
+          echo "5. **Reboot System**" >> $GITHUB_STEP_SUMMARY
+          echo "6. Install manager APK (link di atas)" >> $GITHUB_STEP_SUMMARY
+          echo "7. Buka manager → status kernel harus \`Working\`" >> $GITHUB_STEP_SUMMARY
