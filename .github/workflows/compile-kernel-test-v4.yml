@@ -757,12 +757,22 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           )
 
-          make -j$(nproc --all) "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG_NAME }}
-          make -j$(nproc --all) "${MAKE_ARGS[@]}"
+          # Generate defconfig
+          make -j$(nproc --all) "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG_NAME }} 2>&1 | tee -a build.log
 
+          # Compile kernel (WAJIB tee ke build.log untuk parse ReSukiSU info di step berikutnya)
+          set +e
+          make -j$(nproc --all) "${MAKE_ARGS[@]}" 2>&1 | tee -a build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          # Cek hasil
           if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "[FAIL] Image.gz-dtb not built"
-            exit 1
+            echo "[FAIL] Image.gz-dtb not built (exit status: $BUILD_STATUS)"
+            echo ""
+            echo "== Last errors from build.log =="
+            grep -nE 'error:|Error [0-9]+|fatal:' build.log | tail -30 || true
+            exit $BUILD_STATUS
           fi
 
           KERNEL_VERSION_STRING=$(strings out/vmlinux | grep -m1 "Linux version" || echo "unknown")
@@ -770,94 +780,79 @@ jobs:
           echo "[OK] Kernel version: ${KERNEL_VERSION_STRING}"
 
       # ================================================================
-      # 15b. Extract ReSukiSU + SUSFS build info dari log
+      # 15b. Extract ReSukiSU + SUSFS build info dari build.log
       # ================================================================
-      - name: Extract ReSukiSU version info
+      - name: Extract ReSukiSU version info from build log
         run: |
           cd ${{ env.KERNEL_DIR }}
 
           echo "======================================================"
-          echo "  Extract ReSukiSU + SUSFS Build Info"
+          echo "  Extract ReSukiSU + SUSFS Build Info from build.log"
           echo "======================================================"
 
-          # 1. Ekstrak dari file build log (kalau ada)
+          # Default values
           KSU_VERSION_CODE="unknown"
           KSU_VERSION_NAME="unknown"
+          KSU_SUPPORTED_MGR="unknown"
           KSU_KERNEL_VERSION="unknown"
           KSU_KERNEL_TYPE="unknown"
           KSU_HOOK_TYPE="unknown"
-          SUSFS_VERSION="unknown"
+          SUSFS_VERSION_STR="unknown"
 
-          # ReSukiSU info biasanya print via cmake/scripts saat compile
-          # Cek dari beberapa lokasi
-          for LOG in out/.config out/include/generated/compile.h; do
-            [ ! -f "$LOG" ] && continue
-            grep -E "KSU_VERSION|SUSFS_VERSION" "$LOG" 2>/dev/null || true
-          done
+          # Grep dari build.log (yang di-generate oleh step "Build kernel")
+          if [ -f build.log ]; then
+            echo "[INFO] Parsing build.log..."
 
-          # Ekstrak dari KernelSU source
-          if [ -d KernelSU/kernel ]; then
-            # Version code
-            if [ -f KernelSU/kernel/Makefile ]; then
-              KSU_VC=$(grep -oP 'KSU_VERSION\s*[?:]?=\s*\K[0-9]+' KernelSU/kernel/Makefile 2>/dev/null | head -1)
-              [ -n "$KSU_VC" ] && KSU_VERSION_CODE="$KSU_VC"
-            fi
+            # ReSukiSU version code
+            VC=$(grep -oP -- "-- ReSukiSU version code:\s*\K[0-9]+" build.log | head -1)
+            [ -n "$VC" ] && KSU_VERSION_CODE="$VC"
 
-            # Kernel type
-            if grep -q "GKI" KernelSU/kernel/Kconfig 2>/dev/null; then
-              KSU_KERNEL_TYPE="GKI"
-            else
-              KSU_KERNEL_TYPE="Non-GKI"
-            fi
-          fi
+            # ReSukiSU version name (format: v4.1.0-d5ba3d2d@ReSukiSU)
+            VN=$(grep -oP -- "-- ReSukiSU version name:\s*\K[^\s]+" build.log | head -1)
+            [ -n "$VN" ] && KSU_VERSION_NAME="$VN"
 
-          # Ekstrak dari susfs source
-          if [ -f fs/susfs.c ]; then
-            SUSFS_VER=$(grep -oP '#define\s+SUSFS_VERSION\s+"\K[^"]+' fs/susfs.c 2>/dev/null | head -1)
-            [ -n "$SUSFS_VER" ] && SUSFS_VERSION="$SUSFS_VER"
-          fi
-          if [ -f include/linux/susfs.h ]; then
-            SUSFS_VER=$(grep -oP '#define\s+SUSFS_VERSION\s+"\K[^"]+' include/linux/susfs.h 2>/dev/null | head -1)
-            [ -n "$SUSFS_VER" ] && SUSFS_VERSION="$SUSFS_VER"
-          fi
+            # Supported unofficial managers
+            SM=$(grep -oP -- "-- Supported Unofficial Manager:\s*\K.+" build.log | head -1)
+            [ -n "$SM" ] && KSU_SUPPORTED_MGR="$SM"
 
-          # Kernel version (X.Y)
-          KERNEL_MAJOR=$(make kernelversion 2>/dev/null | grep -oP '^[0-9]+\.[0-9]+' | head -1)
-          [ -n "$KERNEL_MAJOR" ] && KSU_KERNEL_VERSION="$KERNEL_MAJOR"
+            # Kernel version (4.9)
+            KV=$(grep -oP -- "-- KERNEL_VERSION:\s*\K[0-9.]+" build.log | head -1)
+            [ -n "$KV" ] && KSU_KERNEL_VERSION="$KV"
 
-          # Hook type
-          if grep -q "CONFIG_KSU_MANUAL_HOOK=y" out/.config 2>/dev/null; then
-            KSU_HOOK_TYPE="Manual hook"
-          elif grep -q "CONFIG_KPROBES=y" out/.config 2>/dev/null; then
-            KSU_HOOK_TYPE="Kprobe hook"
-          fi
+            # Kernel type (GKI / Non-GKI)
+            KT=$(grep -oP -- "-- KERNEL_TYPE:\s*\K[^\s]+" build.log | head -1)
+            [ -n "$KT" ] && KSU_KERNEL_TYPE="$KT"
 
-          # Version name (kalau ada di git)
-          if [ -d KernelSU ]; then
-            cd KernelSU
-            KSU_VN=$(git describe --tags --abbrev=8 2>/dev/null || git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
-            KSU_VN_FULL="v${KSU_VC:-unknown}-${KSU_VN}@ReSukiSU"
-            KSU_VERSION_NAME="$KSU_VN_FULL"
-            cd ..
+            # Hook type (e.g. "using SuSFS Inline hook")
+            HT=$(grep -oP -- "-- ReSukiSU:\s*\Kusing[^\n]+" build.log | head -1)
+            [ -n "$HT" ] && KSU_HOOK_TYPE="$HT"
+
+            # SUSFS version (v2.2.0)
+            SV=$(grep -oP -- "-- SUSFS_VERSION:\s*\K[^\s]+" build.log | head -1)
+            [ -n "$SV" ] && SUSFS_VERSION_STR="$SV"
+          else
+            echo "[WARN] build.log not found, using defaults"
           fi
 
           # Print info
           echo ""
           echo "  -- ReSukiSU version code: $KSU_VERSION_CODE"
           echo "  -- ReSukiSU version name: $KSU_VERSION_NAME"
+          echo "  -- Supported Unofficial Manager: $KSU_SUPPORTED_MGR"
           echo "  -- KERNEL_VERSION: $KSU_KERNEL_VERSION"
           echo "  -- KERNEL_TYPE: $KSU_KERNEL_TYPE"
           echo "  -- Hook Type: $KSU_HOOK_TYPE"
-          echo "  -- SUSFS_VERSION: $SUSFS_VERSION"
+          echo "  -- SUSFS_VERSION: $SUSFS_VERSION_STR"
           echo ""
 
-          # Export ke GITHUB_ENV untuk dipakai di summary
+          # Export ke GITHUB_ENV
           echo "KSU_VERSION_CODE=${KSU_VERSION_CODE}" >> $GITHUB_ENV
           echo "KSU_VERSION_NAME=${KSU_VERSION_NAME}" >> $GITHUB_ENV
+          echo "KSU_SUPPORTED_MGR=${KSU_SUPPORTED_MGR}" >> $GITHUB_ENV
           echo "KSU_KERNEL_VERSION=${KSU_KERNEL_VERSION}" >> $GITHUB_ENV
           echo "KSU_KERNEL_TYPE=${KSU_KERNEL_TYPE}" >> $GITHUB_ENV
           echo "KSU_HOOK_TYPE=${KSU_HOOK_TYPE}" >> $GITHUB_ENV
-          echo "SUSFS_VERSION_STR=${SUSFS_VERSION}" >> $GITHUB_ENV
+          echo "SUSFS_VERSION_STR=${SUSFS_VERSION_STR}" >> $GITHUB_ENV
 
       # ================================================================
       # 16. Package to Flashable ZIP (INLINE, dalam workflow yang sama)
@@ -962,7 +957,7 @@ jobs:
           retention-days: 7
 
       # ================================================================
-      # 18. Build summary (enhanced dengan info manager APK)
+      # 18. Build summary (enhanced dengan info dari build log)
       # ================================================================
       - name: Build summary
         if: always()
@@ -998,7 +993,8 @@ jobs:
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Version Code | \`${KSU_VERSION_CODE:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Version Name | \`${KSU_VERSION_NAME:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Hook Type | \`${KSU_HOOK_TYPE:-unknown}\` (7 hooks) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Hook Type | \`${KSU_HOOK_TYPE:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Supported Managers | \`${KSU_SUPPORTED_MGR:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Source | [ReSukiSU](${{ env.RESUKISU_REPO }}) |" >> $GITHUB_STEP_SUMMARY
           echo "| Branch/Tag | \`${{ github.event.inputs.resukisu_branch || 'main' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -1007,25 +1003,25 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Version | \`${SUSFS_VERSION_STR:-v2.2.0}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${SUSFS_VERSION_STR:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Features Enabled | Magic Mount, Sus Path/Mount/Kstat/Map, Spoof Uname/Cmdline, Open Redirect |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           echo "### 📥 Manager APK yang Kompatibel" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Download manager APK dari salah satu source berikut (pilih **versi yang sesuai** dengan version code kernel: \`${KSU_VERSION_CODE:-unknown}\`):" >> $GITHUB_STEP_SUMMARY
+          echo "Download manager APK yang **kompatibel dengan version code \`${KSU_VERSION_CODE:-unknown}\`**:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **[ReSukiSU (official)](https://github.com/ReSukiSU/ReSukiSU/releases)**" >> $GITHUB_STEP_SUMMARY
-          echo "- **[SukiSU-Ultra](https://github.com/ShirkNeko/SukiSU-Ultra/releases)** (compatible manager)" >> $GITHUB_STEP_SUMMARY
-          echo "- **[MKSU](https://github.com/5ec1cff/KernelSU/releases)** (compatible manager)" >> $GITHUB_STEP_SUMMARY
-          echo "- **[RKSU](https://github.com/rifsxd/KernelSU-Next/releases)** (compatible manager)" >> $GITHUB_STEP_SUMMARY
-          echo "- **[KOWSU](https://github.com/KOWX712/KernelSU/releases)** (compatible manager)" >> $GITHUB_STEP_SUMMARY
+          echo "- **[ReSukiSU (official)](https://github.com/ReSukiSU/ReSukiSU/releases)** ⭐" >> $GITHUB_STEP_SUMMARY
+          echo "- **[SukiSU-Ultra](https://github.com/ShirkNeko/SukiSU-Ultra/releases)**" >> $GITHUB_STEP_SUMMARY
+          echo "- **[MKSU](https://github.com/5ec1cff/KernelSU/releases)**" >> $GITHUB_STEP_SUMMARY
+          echo "- **[RKSU (KernelSU-Next)](https://github.com/rifsxd/KernelSU-Next/releases)**" >> $GITHUB_STEP_SUMMARY
+          echo "- **[KOWSU](https://github.com/KOWX712/KernelSU/releases)**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           echo "### 📦 Artifacts" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "1. **\`${{ github.event.inputs.zip_name }}-${{ steps.timestamp.outputs.datetime }}\`** — 🎯 **FLASHABLE ZIP** (siap flash TWRP)" >> $GITHUB_STEP_SUMMARY
-          echo "2. **\`${{ github.event.inputs.zip_name }}-image-${{ steps.timestamp.outputs.datetime }}\`** — raw \`Image.gz-dtb\` (untuk manual repack)" >> $GITHUB_STEP_SUMMARY
+          echo "2. **\`${{ github.event.inputs.zip_name }}-image-${{ steps.timestamp.outputs.datetime }}\`** — raw \`Image.gz-dtb\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           echo "### 🎨 Kernel String di AnyKernel3" >> $GITHUB_STEP_SUMMARY
